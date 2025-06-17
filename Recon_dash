@@ -1,0 +1,150 @@
+# app.py
+import base64
+import io
+import pandas as pd
+from dash import Dash, dcc, html, Input, Output, State, callback_context, dash_table
+import dash_bootstrap_components as dbc
+
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+server = app.server
+
+# ---------- Utility Functions ----------
+def parse_contents(contents):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    return pd.read_excel(io.BytesIO(decoded))
+
+def get_anomaly_summary(df1, df2, threshold_pct):
+    group_cols = ['grca_dimension2', 'grca_dimension3']
+    df1_grouped = df1.groupby(group_cols)['book_value'].sum().reset_index().rename(columns={'book_value': 'source_value'})
+    df2_grouped = df2.groupby(group_cols)['book_value'].sum().reset_index().rename(columns={'book_value': 'reference_value'})
+
+    merged = pd.merge(df1_grouped, df2_grouped, on=group_cols, how='outer').fillna(0)
+    merged['difference'] = merged['source_value'] - merged['reference_value']
+    merged['pct_change'] = (merged['difference'] / (merged['reference_value'] + 1e-9)) * 100
+    anomalies = merged[merged['pct_change'].abs() > threshold_pct]
+    return anomalies
+
+def get_drilldown_data(df1, df2, dim2, dim3, selected_cdes):
+    df1_filtered = df1[(df1['grca_dimension2'] == dim2) & (df1['grca_dimension3'] == dim3)]
+    df2_filtered = df2[(df2['grca_dimension2'] == dim2) & (df2['grca_dimension3'] == dim3)]
+    
+    common_cols = list(set(df1_filtered.columns).intersection(df2_filtered.columns))
+    selected_cols = [col for col in selected_cdes if col in common_cols]
+    df1_view = df1_filtered[selected_cols + ['book_value']].copy()
+    df2_view = df2_filtered[selected_cols + ['book_value']].copy()
+
+    df1_view['source_or_ref'] = 'Source'
+    df2_view['source_or_ref'] = 'Reference'
+
+    drilldown = pd.concat([df1_view, df2_view], ignore_index=True)
+    return drilldown
+
+# ---------- Layout ----------
+app.layout = dbc.Container([
+    html.H2("\U0001F50D Anomaly Detection & Reconciliation Tool", className="text-center my-4"),
+
+    dbc.Row([
+        dbc.Col([
+            html.Label("Upload Source File:"),
+            dcc.Upload(id='upload-source', children=dbc.Button('Upload Source', color='primary', className='w-100'), className='mb-2'),
+        ], width=4),
+
+        dbc.Col([
+            html.Label("Upload Reference File:"),
+            dcc.Upload(id='upload-reference', children=dbc.Button('Upload Reference', color='secondary', className='w-100'), className='mb-2'),
+        ], width=4),
+
+        dbc.Col([
+            html.Label("Select Threshold (%):"),
+            dcc.Dropdown(
+                id='threshold-dropdown',
+                options=[{'label': f'{i}%', 'value': i} for i in range(0, 105, 5)],
+                value=10,
+                className='mb-2'
+            )
+        ], width=4),
+    ], className='mb-4'),
+
+    html.H4("\U0001F6A8 Anomaly Summary Table", className='text-info'),
+    dash_table.DataTable(
+        id='anomaly-table',
+        row_selectable='single',
+        page_size=10,
+        style_table={'overflowX': 'auto'},
+        style_cell={
+            'minWidth': '120px', 'width': '150px', 'maxWidth': '180px',
+            'whiteSpace': 'normal', 'textAlign': 'center'
+        },
+        style_header={
+            'backgroundColor': 'rgb(230, 230, 230)',
+            'fontWeight': 'bold'
+        },
+        style_data_conditional=[
+            {
+                'if': {'row_index': 'odd'},
+                'backgroundColor': 'rgb(248, 248, 248)'
+            }
+        ]
+    ),
+
+    html.Hr(),
+    html.Div(id='drilldown-section', children=[
+        html.H4("\U0001F9D0 Drilldown Details", className='text-secondary'),
+        dcc.Dropdown(id='cde-selector', multi=True, placeholder='Select CDEs for drilldown...'),
+        dash_table.DataTable(
+            id='drilldown-table',
+            page_size=10,
+            style_table={'overflowX': 'auto'},
+            style_cell={
+                'minWidth': '120px', 'width': '150px', 'maxWidth': '180px',
+                'whiteSpace': 'normal', 'textAlign': 'center'
+            },
+            style_header={
+                'backgroundColor': 'rgb(220, 220, 220)',
+                'fontWeight': 'bold'
+            }
+        )
+    ])
+], fluid=True)
+
+# ---------- Callbacks ----------
+@app.callback(
+    Output('anomaly-table', 'data'),
+    Output('anomaly-table', 'columns'),
+    Output('cde-selector', 'options'),
+    State('upload-source', 'contents'),
+    State('upload-reference', 'contents'),
+    Input('threshold-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def update_anomaly_table(src_contents, ref_contents, threshold):
+    df1 = parse_contents(src_contents)
+    df2 = parse_contents(ref_contents)
+    anomalies = get_anomaly_summary(df1, df2, threshold)
+    columns = [{'name': col, 'id': col} for col in anomalies.columns]
+    cde_options = [{'label': col, 'value': col} for col in df1.columns if col not in ['book_value', 'grca_dimension2', 'grca_dimension3']]
+    app.server.df1 = df1
+    app.server.df2 = df2
+    return anomalies.to_dict('records'), columns, cde_options
+
+@app.callback(
+    Output('drilldown-table', 'data'),
+    Output('drilldown-table', 'columns'),
+    Input('anomaly-table', 'active_cell'),
+    State('anomaly-table', 'data'),
+    Input('cde-selector', 'value'),
+    prevent_initial_call=True
+)
+def display_drilldown_table(active_cell, table_data, selected_cdes):
+    if active_cell is None or not selected_cdes:
+        return [], []
+    row = table_data[active_cell['row']]
+    dim2, dim3 = row['grca_dimension2'], row['grca_dimension3']
+    df1, df2 = app.server.df1, app.server.df2
+    drill = get_drilldown_data(df1, df2, dim2, dim3, selected_cdes)
+    columns = [{'name': col, 'id': col} for col in drill.columns]
+    return drill.to_dict('records'), columns
+
+if __name__ == '__main__':
+    app.run_server(debug=True)
