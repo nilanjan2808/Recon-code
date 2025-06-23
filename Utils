@@ -1,0 +1,90 @@
+# utils.py
+import base64
+import io
+import pandas as pd
+from sklearn.feature_selection import mutual_info_classif
+
+def parse_contents(contents):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    try:
+        return pd.read_csv(io.BytesIO(decoded))
+    except Exception:
+        return pd.DataFrame()
+
+def get_anomaly_summary(df1, df2, threshold_pct):
+    group_cols = ['global_custom_dimension2', 'global_custom_dimension3']
+
+    df1['book_value'] = pd.to_numeric(df1['book_value'], errors='coerce').fillna(0.0)
+    df2['book_value'] = pd.to_numeric(df2['book_value'], errors='coerce').fillna(0.0)
+
+    df1_grouped = df1.groupby(group_cols)['book_value'].sum().reset_index().rename(columns={'book_value': 'source_value'})
+    df2_grouped = df2.groupby(group_cols)['book_value'].sum().reset_index().rename(columns={'book_value': 'reference_value'})
+
+    merged = pd.merge(df1_grouped, df2_grouped, on=group_cols, how='outer').fillna(0)
+    merged['difference'] = merged['source_value'] - merged['reference_value']
+    merged['pct_change'] = (merged['difference'] / (merged['reference_value'] + 1e-9)) * 100
+    merged['pct_change'] = merged['pct_change'].map(lambda x: f"{x:.2f}%")
+    anomalies = merged[merged['pct_change'].str.rstrip('%').astype(float).abs() > threshold_pct]
+    return anomalies
+
+def get_drilldown_data(df1, df2, dim2, dim3, selected_cdes):
+    df1_filtered = df1[(df1['global_custom_dimension2'] == dim2) & (df1['global_custom_dimension3'] == dim3)]
+    df2_filtered = df2[(df2['global_custom_dimension2'] == dim2) & (df2['global_custom_dimension3'] == dim3)]
+
+    df1_grouped = df1_filtered.groupby(selected_cdes)['book_value'].sum().reset_index().rename(columns={'book_value': 'source_value'})
+    df2_grouped = df2_filtered.groupby(selected_cdes)['book_value'].sum().reset_index().rename(columns={'book_value': 'reference_value'})
+
+    merged = pd.merge(df1_grouped, df2_grouped, on=selected_cdes, how='outer').fillna(0)
+    merged['difference'] = merged['source_value'] - merged['reference_value']
+    merged['pct_change'] = (merged['difference'] / (merged['reference_value'] + 1e-9)) * 100
+    merged['pct_change'] = merged['pct_change'].map(lambda x: f"{x:.2f}%")
+
+    return merged
+
+def get_suggested_cdes(df1, df2):
+    common_cols = set(df1.columns).intersection(set(df2.columns))
+    exclude_exact = ['book_value', 'global_custom_dimension2', 'global_custom_dimension3']
+    exclude_keywords = ['id', 'key', 'code', 'value', 'amount', 'date', 'time', 'dollar']
+
+    suggested = []
+    for col in common_cols:
+        if col in exclude_exact or any(kw in col.lower() for kw in exclude_keywords):
+            continue
+        if df1[col].dropna().nunique() <= 1 or df2[col].dropna().nunique() <= 1:
+            continue
+        if df1[col].isnull().all() or df2[col].isnull().all():
+            continue
+        if pd.api.types.is_numeric_dtype(df1[col]):
+            continue
+        if df1[col].dtype in ['object', 'category', 'bool'] or df1[col].nunique() < 50:
+            suggested.append(col)
+
+    return suggested
+
+def get_density_ranked_cdes(df1, df2):
+    summary = get_anomaly_summary(df1, df2, 0)
+    summary['anomaly_flag'] = summary['pct_change'].str.rstrip('%').astype(float).abs() > 10
+    df = df1.merge(df2, on=['global_custom_dimension2', 'global_custom_dimension3'], suffixes=('_src', '_ref'))
+    df = df.merge(summary[['global_custom_dimension2', 'global_custom_dimension3', 'anomaly_flag']], on=['global_custom_dimension2', 'global_custom_dimension3'], how='left').fillna(False)
+    candidates = get_suggested_cdes(df1, df2)
+    enc_df = pd.get_dummies(df[candidates], dummy_na=True).astype(int)
+    if not enc_df.empty:
+        scores = mutual_info_classif(enc_df, df['anomaly_flag'], discrete_features=True)
+        ranking = pd.DataFrame({'CDE': enc_df.columns, 'score': scores}).sort_values(by='score', ascending=False)
+        return ranking
+    return pd.DataFrame(columns=['CDE', 'score'])
+
+def get_density_summary(df1, df2, selected_cdes):
+    df1['book_value'] = pd.to_numeric(df1['book_value'], errors='coerce').fillna(0.0)
+    df2['book_value'] = pd.to_numeric(df2['book_value'], errors='coerce').fillna(0.0)
+
+    df1_grouped = df1.groupby(selected_cdes)['book_value'].sum().reset_index().rename(columns={'book_value': 'source_value'})
+    df2_grouped = df2.groupby(selected_cdes)['book_value'].sum().reset_index().rename(columns={'book_value': 'reference_value'})
+
+    merged = pd.merge(df1_grouped, df2_grouped, on=selected_cdes, how='outer').fillna(0)
+    merged['difference'] = merged['source_value'] - merged['reference_value']
+    merged['pct_change'] = (merged['difference'] / (merged['reference_value'] + 1e-9)) * 100
+    merged['pct_change'] = merged['pct_change'].map(lambda x: f"{x:.2f}%")
+
+    return merged
