@@ -1,0 +1,50 @@
+from dash import Input, Output, State, callback, dcc
+import pandas as pd
+import io
+import xlsxwriter
+
+@callback(
+    Output("excel-download", "data"),
+    Input("download-button", "n_clicks"),
+    State("anomaly-table", "data"),
+    State("drilldown-table", "children"),
+    State("cde-comparison-table", "children"),
+    prevent_initial_call=True
+)
+def generate_excel(n_clicks, anomaly_data, drilldown_table_children, cde_comparison_table_children):
+    # Convert table data
+    anomaly_df = pd.DataFrame(anomaly_data)
+
+    drilldown_data = drilldown_table_children.props["data"] if hasattr(drilldown_table_children, 'props') else []
+    drilldown_df = pd.DataFrame(drilldown_data)
+
+    cde_comp_data = cde_comparison_table_children.props["data"] if hasattr(cde_comparison_table_children, 'props') else []
+    comparison_df = pd.DataFrame(cde_comp_data)
+
+    # Create Excel file in memory
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        header_format = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#F2F2F2'})
+        cell_format = workbook.add_format({'border': 1})
+
+        def write_sheet(df, sheet_name):
+            df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1, header=False)
+            worksheet = writer.sheets[sheet_name]
+
+            # Write headers with formatting
+            for col_num, value in enumerate(df.columns):
+                worksheet.write(0, col_num, value, header_format)
+
+            # Apply cell formatting and autofit columns
+            for col_num, col in enumerate(df.columns):
+                col_width = max(df[col].astype(str).map(len).max(), len(str(col))) + 2
+                worksheet.set_column(col_num, col_num, col_width)
+                worksheet.set_column(col_num, col_num, col_width, cell_format)
+
+        write_sheet(anomaly_df, "Anomaly Summary")
+        write_sheet(drilldown_df, "Drilldown Table")
+        write_sheet(comparison_df, "CDE Comparison")
+
+    output.seek(0)
+    return dcc.send_bytes(output.read(), filename="anomaly_report.xlsx")
