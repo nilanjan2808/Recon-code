@@ -1,0 +1,12 @@
+import duckdb
+
+# Create an in-memory DuckDB instance
+con = duckdb.connect()
+
+# Create a merged DataFrame by running a SQL join across both CSVs
+merged_df = con.execute("""
+SELECT a.*, b.*
+FROM read_csv('file1.csv', AUTO_DETECT TRUE) AS a
+LEFT JOIN read_csv('file2.csv', AUTO_DETECT TRUE) AS b
+USING (Con)
+""").df()
