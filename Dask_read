@@ -1,0 +1,17 @@
+import dask.dataframe as dd
+from dask.distributed import Client
+import pandas as pd
+
+# Start a local Dask cluster
+client = Client()
+
+# 1. Read large CSVs using Dask
+ddf1 = dd.read_csv('file1.csv', dtype={'Con': 'category'}, blocksize="64MB")
+ddf2 = dd.read_csv('file2.csv', dtype={'Con': 'category'}, blocksize="64MB")
+
+# 2. Efficient join on 'Con'
+merged_ddf = ddf1.merge(ddf2, on='Con', how='left')
+
+# 3. Compute to pandas if it fits in memory
+df1 = ddf1.compute()
+merged_df = merged_ddf.compute()
