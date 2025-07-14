@@ -1,0 +1,29 @@
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Optional: merge df and gl_april_df if not already done
+merged_df = pd.merge(df, gl_april_df, on='Con', how='left')
+
+# Function to plot correlation heatmap
+def plot_correlation_heatmap(data, title, top_k=30):
+    # Use only numeric columns
+    numeric_df = data.select_dtypes(include='number')
+    
+    # Limit to top_k features with highest variance (optional, to reduce clutter)
+    top_cols = numeric_df.var().sort_values(ascending=False).head(top_k).index
+    corr = numeric_df[top_cols].corr()
+
+    # Plot
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(corr, annot=False, cmap='coolwarm', center=0, linewidths=0.5)
+    plt.title(title, fontsize=14)
+    plt.xticks(rotation=90)
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+# Plot for df
+plot_correlation_heatmap(df, "Correlation Heatmap: df")
+
+# Plot for merged df
+plot_correlation_heatmap(merged_df, "Correlation Heatmap: merged df")
