@@ -1,0 +1,15 @@
+import polars as pl
+
+# Efficient: scans both CSVs lazily without loading everything
+lf1 = pl.scan_csv("file1.csv", columns=["Con", *other_cols1])
+lf2 = pl.scan_csv("file2.csv", columns=["Con", *other_cols2])
+
+# Lazy join—performed in streaming/out-of-core mode
+merged_lf = (
+    lf1.join(lf2, on="Con", how="left")
+    .collect(streaming=True)  # only bring joined result into memory chunk by chunk
+)
+
+# merged_lf is now a polars DataFrame manageable in size
+# Convert to pandas if needed:
+merged_df = merged_lf.to_pandas()
