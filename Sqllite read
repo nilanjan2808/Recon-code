@@ -1,1 +1,27 @@
+import sqlite3
+import pandas as pd
+
+# 1️⃣ Connect to on-disk SQLite database
+con = sqlite3.connect("temp_merge.db")
+
+# 2️⃣ Load smaller file fully
+pd.read_csv("file1.csv").to_sql("t1", con, if_exists="replace", index=False)
+
+# 3️⃣ Stream-load the larger file into SQLite in chunks
+for chunk in pd.read_csv("file2.csv", chunksize=100_000):
+    chunk.to_sql("t2", con, if_exists="append", index=False)
+
+# 4️⃣ Perform the join in-database, pulling result in chunks
+merged_chunks = []
+for chunk in pd.read_sql("""
+    SELECT t2.*, t1.*
+    FROM t2 LEFT JOIN t1 USING (Con)
+""", con, chunksize=100_000):
+    merged_chunks.append(chunk)
+
+# 5️⃣ Combine or process on the fly
+# Example: train the RF model on each chunk
+for batch in merged_chunks:
+    results = run_rf_model(batch)
+    print(results)
 
