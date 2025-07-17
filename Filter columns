@@ -1,0 +1,7 @@
+def filter_strings(strings, keywords=None):
+    if keywords is None:
+        keywords = ['id', 'key', 'number', 'date', 'con']
+    
+    keywords = [k.lower() for k in keywords]
+    filtered = [s for s in strings if not any(k in s.lower() for k in keywords)]
+    return filtered
