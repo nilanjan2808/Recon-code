@@ -1,0 +1,35 @@
+import pandas as pd
+from sklearn.utils import resample
+
+def downsample_majority_class(file_path, target_col):
+    """
+    Reads a CSV file and downsamples the majority class by dividing it by 10.
+    
+    Parameters:
+    - file_path (str): Path to the CSV file.
+    - target_col (str): Name of the target column.
+    
+    Returns:
+    - pd.DataFrame: Downsampled DataFrame.
+    """
+    df = pd.read_csv(file_path)
+
+    # Get class distribution
+    class_counts = df[target_col].value_counts()
+    majority_class = class_counts.idxmax()
+    minority_classes = class_counts[class_counts.index != majority_class].index.tolist()
+
+    # Separate majority and minority classes
+    df_majority = df[df[target_col] == majority_class]
+    df_minority = df[df[target_col] != majority_class]
+
+    # Downsample majority class
+    n_samples = max(1, len(df_majority) // 10)  # Avoid 0 samples
+    df_majority_downsampled = resample(df_majority,
+                                       replace=False,
+                                       n_samples=n_samples,
+                                       random_state=42)
+
+    # Combine
+    df_downsampled = pd.concat([df_majority_downsampled, df_minority], ignore_index=True)
+    return df_downsampled
