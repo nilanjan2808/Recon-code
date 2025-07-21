@@ -2,13 +2,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils.dataframe import dataframe_to_rows
 
-def plot_and_save_summary(df, feature_fields, target_field, output_folder="correlation_output"):
-    os.makedirs(output_folder, exist_ok=True)
-    correlations = []
-    
-    # Make sure target is numeric
+def plot_and_save_excel(df, feature_fields, target_field, output_file="correlation_report.xlsx"):
+    # Make sure target column is numeric
     df[target_field] = pd.to_numeric(df[target_field], errors='coerce')
+
+    # Prepare results
+    results = []
+    image_buffers = {}  # Dict to store plots in memory
 
     for feature in feature_fields:
         status = "OK"
@@ -23,24 +28,46 @@ def plot_and_save_summary(df, feature_fields, target_field, output_folder="corre
             if temp_df.empty:
                 status = "Non-numeric or all NaN"
             else:
+                # Correlation
                 corr_value = temp_df[feature].corr(temp_df[target_field])
 
-                # Plot and save
-                plt.figure(figsize=(6, 4))
-                sns.scatterplot(data=temp_df, x=feature, y=target_field)
-                plt.title(f"{feature} vs {target_field} (Corr: {corr_value:.2f})")
-                plt.grid(True)
+                # Create and store plot in memory
+                fig, ax = plt.subplots(figsize=(6, 4))
+                sns.scatterplot(data=temp_df, x=feature, y=target_field, ax=ax)
+                ax.set_title(f"{feature} vs {target_field} (Corr: {corr_value:.2f})")
+                ax.grid(True)
                 plt.tight_layout()
-                plt.savefig(f"{output_folder}/{feature}_vs_{target_field}.png")
-                plt.close()
 
-        correlations.append({
+                buf = BytesIO()
+                fig.savefig(buf, format='png')
+                buf.seek(0)
+                image_buffers[feature] = buf
+                plt.close(fig)
+
+        results.append({
             "feature": feature,
             "correlation": corr_value,
             "status": status
         })
 
-    # Save summary to Excel
-    summary_df = pd.DataFrame(correlations)
-    summary_df.to_excel(f"{output_folder}/correlation_summary.xlsx", index=False)
-    print(f"✅ Plots and summary saved in: {output_folder}")
+    # Create Excel workbook
+    wb = Workbook()
+    summary_ws = wb.active
+    summary_ws.title = "summary"
+
+    # Write summary table
+    summary_df = pd.DataFrame(results)
+    for r in dataframe_to_rows(summary_df, index=False, header=True):
+        summary_ws.append(r)
+
+    # Add each plot to a new sheet
+    for feature, img_buf in image_buffers.items():
+        ws = wb.create_sheet(title=feature[:31])  # Excel sheet names have 31-char limit
+        img = XLImage(img_buf)
+        img.anchor = 'A1'
+        ws.add_image(img)
+
+    # Save final Excel file
+    wb.save(output_file)
+    print(f"✅ Excel report saved to: {output_file}")
+
