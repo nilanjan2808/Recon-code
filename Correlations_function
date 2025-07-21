@@ -1,30 +1,53 @@
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import pandas as pd
+from matplotlib.backends.backend_pdf import PdfPages
 
-def plot_correlations_and_scatters(df, feature_fields, target_field):
+def plot_correlations_to_pdf(df, feature_fields, target_field, output_pdf_path="correlation_plots.pdf"):
+    skipped_fields = []
     correlations = {}
-    
-    for feature in feature_fields:
-        if feature not in df.columns:
-            print(f"Skipping '{feature}' — not in DataFrame.")
-            continue
 
-        # Drop rows with NaNs in the selected columns
-        temp_df = df[[feature, target_field]].dropna()
+    # Convert target to numeric if possible
+    df[target_field] = pd.to_numeric(df[target_field], errors='coerce')
 
-        # Calculate correlation
-        corr = temp_df[feature].corr(temp_df[target_field])
-        correlations[feature] = corr
+    with PdfPages(output_pdf_path) as pdf:
+        for feature in feature_fields:
+            if feature not in df.columns:
+                skipped_fields.append(f"{feature} — not found in DataFrame.")
+                continue
 
-        # Plot
-        plt.figure(figsize=(6, 4))
-        sns.scatterplot(data=temp_df, x=feature, y=target_field)
-        plt.title(f'{feature} vs {target_field}\nCorrelation: {corr:.2f}')
-        plt.xlabel(feature)
-        plt.ylabel(target_field)
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-    
+            # Convert feature to numeric
+            df[feature] = pd.to_numeric(df[feature], errors='coerce')
+
+            temp_df = df[[feature, target_field]].dropna()
+
+            if temp_df.empty:
+                skipped_fields.append(f"{feature} — not numeric or all NaNs.")
+                continue
+
+            corr = temp_df[feature].corr(temp_df[target_field])
+            correlations[feature] = corr
+
+            # Create scatter plot
+            plt.figure(figsize=(6, 4))
+            sns.scatterplot(data=temp_df, x=feature, y=target_field)
+            plt.title(f'{feature} vs {target_field}\nCorrelation: {corr:.2f}')
+            plt.xlabel(feature)
+            plt.ylabel(target_field)
+            plt.grid(True)
+            plt.tight_layout()
+
+            # Save to PDF
+            pdf.savefig()
+            plt.close()
+
+        # Add a final page summarizing skipped fields
+        plt.figure(figsize=(8.5, 11))
+        plt.axis('off')
+        text = "Skipped Fields (non-numeric or not found):\n\n" + "\n".join(skipped_fields) if skipped_fields else "No fields were skipped."
+        plt.text(0, 1, text, fontsize=12, va='top')
+        pdf.savefig()
+        plt.close()
+
+    print(f"PDF saved to {output_pdf_path}")
     return correlations
