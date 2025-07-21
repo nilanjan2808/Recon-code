@@ -1,0 +1,30 @@
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+def plot_correlations_and_scatters(df, feature_fields, target_field):
+    correlations = {}
+    
+    for feature in feature_fields:
+        if feature not in df.columns:
+            print(f"Skipping '{feature}' — not in DataFrame.")
+            continue
+
+        # Drop rows with NaNs in the selected columns
+        temp_df = df[[feature, target_field]].dropna()
+
+        # Calculate correlation
+        corr = temp_df[feature].corr(temp_df[target_field])
+        correlations[feature] = corr
+
+        # Plot
+        plt.figure(figsize=(6, 4))
+        sns.scatterplot(data=temp_df, x=feature, y=target_field)
+        plt.title(f'{feature} vs {target_field}\nCorrelation: {corr:.2f}')
+        plt.xlabel(feature)
+        plt.ylabel(target_field)
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+    
+    return correlations
