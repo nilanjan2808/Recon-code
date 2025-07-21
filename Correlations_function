@@ -1,29 +1,46 @@
 import pandas as pd
-import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from docx import Document
-from docx.shared import Inches
 import os
 
-def plot_correlations_to_doc(df, feature_fields, target_field, output_docx_path="correlation_report.docx"):
-    from datetime import datetime
-    import tempfile
-
-    skipped_fields = []
-    correlations = {}
-
-    # Convert target column to numeric
+def plot_and_save_summary(df, feature_fields, target_field, output_folder="correlation_output"):
+    os.makedirs(output_folder, exist_ok=True)
+    correlations = []
+    
+    # Make sure target is numeric
     df[target_field] = pd.to_numeric(df[target_field], errors='coerce')
 
-    # Create a new Word document
-    doc = Document()
-    doc.add_heading('Correlation Report', 0)
-    doc.add_paragraph(f"Target field: {target_field}")
-    doc.add_paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    for feature in feature_fields:
+        status = "OK"
+        corr_value = None
 
-    # Create temp directory for plots
-    with tempfile.TemporaryDirectory() as tmpdir:
-        for feature in feature_fields:
-            if feature not in df.columns:
-                skipped_fields.append(f"{feature} — not found in DataFrame.")
+        if feature not in df.columns:
+            status = "Not found"
+        else:
+            df[feature] = pd.to_numeric(df[feature], errors='coerce')
+            temp_df = df[[feature, target_field]].dropna()
+
+            if temp_df.empty:
+                status = "Non-numeric or all NaN"
+            else:
+                corr_value = temp_df[feature].corr(temp_df[target_field])
+
+                # Plot and save
+                plt.figure(figsize=(6, 4))
+                sns.scatterplot(data=temp_df, x=feature, y=target_field)
+                plt.title(f"{feature} vs {target_field} (Corr: {corr_value:.2f})")
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(f"{output_folder}/{feature}_vs_{target_field}.png")
+                plt.close()
+
+        correlations.append({
+            "feature": feature,
+            "correlation": corr_value,
+            "status": status
+        })
+
+    # Save summary to Excel
+    summary_df = pd.DataFrame(correlations)
+    summary_df.to_excel(f"{output_folder}/correlation_summary.xlsx", index=False)
+    print(f"✅ Plots and summary saved in: {output_folder}")
