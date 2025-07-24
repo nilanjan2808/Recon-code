@@ -1,0 +1,72 @@
+
+Summary Report: Random Forest Model & Data Preparation
+
+Purpose:
+To build and evaluate a Random Forest classification model using prepared input datasets with a focus on:
+- Addressing class imbalance
+- Merging external features
+- Evaluating model performance with a confusion matrix and metrics
+- Creating a final merged report for assessment
+
+1. Data Preparation
+
+Input Files:
+- apr_filter.csv — Main dataset
+- gl_april_filter.csv — Lookup table with additional fields
+
+Key Steps:
+- Read both datasets.
+- Merged the datasets using 'Con' and date fields.
+- Standardized column names by converting to lowercase and removing underscores (except for 'Con').
+- Handled class imbalance using downsampling of the majority class by a specified factor.
+
+2. Model Training
+
+Libraries Used:
+- scikit-learn (Random Forest, metrics, train-test split)
+- imblearn (SMOTE for handling class imbalance)
+
+Preprocessing:
+- Encoded categorical columns.
+- Split dataset into training and testing sets (80:20 split).
+- Optionally applied SMOTE for oversampling the minority class.
+
+Model Training:
+- Trained a Random Forest classifier with 100 estimators and a fixed random seed for reproducibility.
+
+3. Model Evaluation
+
+Predictions:
+- Generated predictions on the test set.
+
+Confusion Matrix:
+- Created a 2x2 matrix showing true/false positives and negatives.
+
+Metrics:
+- Accuracy
+- Precision
+- Recall
+- F1 Score
+
+Classification Report:
+- Detailed performance breakdown for each class.
+
+4. Merged Evaluation Logic
+
+- For multiple model iterations, individual confusion matrices were summed.
+- Final confusion matrix and metrics were calculated from the aggregated matrix.
+
+Optional Add-ons
+
+Feature Importance:
+- Extracted and ranked the most important features influencing the model.
+
+Save Results:
+- Stored metrics, confusion matrices, feature importance, and predictions into structured outputs like Excel or CSV.
+
+Learnings
+
+- Downsampling and SMOTE are effective techniques to handle class imbalance.
+- Random Forest is robust to overfitting and gives interpretable feature importance.
+- Lookup table merges enrich the dataset and improve model quality.
+- Using aggregated evaluation across runs provides a more reliable view of model performance.
