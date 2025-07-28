@@ -1,0 +1,93 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score, fbeta_score, recall_score, precision_score
+
+def best_threshold_checker(
+    df,
+    y_true_col,
+    score_cols,
+    fixed_thresholds={},
+    optimize_metric='f1',  # options: 'f1', 'f2', 'recall', 'precision'
+    beta=2.0,
+    step=0.01,
+    return_all=False,
+    plot=True
+):
+    """
+    df: DataFrame containing scores and true labels
+    y_true_col: name of true label column
+    score_cols: list of score column names to threshold
+    fixed_thresholds: dict of thresholds you want to fix (e.g., {'impact_score': 0.7})
+    optimize_metric: which metric to optimize ('f1', 'f2', 'recall', 'precision')
+    beta: for fbeta score
+    step: threshold search step size
+    return_all: if True, returns all thresholds and results
+    plot: whether to show threshold vs metric plot
+    """
+    y_true = df[y_true_col]
+    best_thresholds = {}
+    all_results = {}
+
+    def get_metric(y_true, y_pred):
+        if optimize_metric == 'f1':
+            return f1_score(y_true, y_pred)
+        elif optimize_metric == 'f2':
+            return fbeta_score(y_true, y_pred, beta=beta)
+        elif optimize_metric == 'recall':
+            return recall_score(y_true, y_pred)
+        elif optimize_metric == 'precision':
+            return precision_score(y_true, y_pred)
+        else:
+            raise ValueError("Invalid metric")
+
+    for col in score_cols:
+        if col in fixed_thresholds:
+            best_thresholds[col] = fixed_thresholds[col]
+            continue
+
+        scores = df[col]
+        metric_scores = []
+        thresholds = np.arange(0, 1, step)
+        best_score = -1
+        best_thresh = 0.5
+
+        for thresh in thresholds:
+            y_pred = (scores >= thresh).astype(int)
+            score = get_metric(y_true, y_pred)
+            metric_scores.append(score)
+            if score > best_score:
+                best_score = score
+                best_thresh = thresh
+
+        best_thresholds[col] = best_thresh
+        all_results[col] = {
+            'threshold': best_thresh,
+            'score': best_score,
+            'all_scores': metric_scores,
+            'thresholds': thresholds
+        }
+
+        if plot:
+            plt.figure(figsize=(7, 4))
+            plt.plot(thresholds, metric_scores, label=f'{optimize_metric} vs threshold')
+            plt.axvline(best_thresh, color='red', linestyle='--', label=f'Best threshold: {best_thresh:.2f}')
+            plt.title(f'{optimize_metric.capitalize()} vs Threshold for {col}')
+            plt.xlabel('Threshold')
+            plt.ylabel(optimize_metric)
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.show()
+
+    # Combine predictions using AND of all thresholds
+    pred_temp = pd.Series(1, index=df.index)
+    for col in score_cols:
+        pred_temp &= (df[col] >= best_thresholds[col]).astype(int)
+
+    df['pred_temp'] = pred_temp
+
+    if return_all:
+        return df, best_thresholds, all_results
+    else:
+        return df, best_thresholds
