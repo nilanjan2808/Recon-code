@@ -1,0 +1,13 @@
+import pandas as pd
+
+# Group by Source Chartfield Description and Cadency
+grouped = df.groupby(['Source Chartfield Description', 'Cadency']).size().unstack(fill_value=0)
+
+# Rename columns for clarity
+grouped.columns = ['cadency_0_count', 'cadency_1_count']
+
+# Add total count column
+grouped['total_count'] = grouped['cadency_0_count'] + grouped['cadency_1_count']
+
+# Reset index if you want a flat DataFrame
+result = grouped.reset_index()
