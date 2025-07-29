@@ -39,18 +39,21 @@ def encode_categoricals(df):
 # ----------------------
 # 3. Preprocess Function
 # ----------------------
-def preprocess_df(df, target_col):
+def preprocess_df(df, target_col, features=None):
     df = df.copy()
-    y = df[target_col]
-    X = df.drop(columns=[target_col])
 
-    X = impute_missing_values(X)
-    X_encoded, encoders = encode_categoricals(X)
+    if features is not None:
+        all_cols = features + [target_col]
+        df = df[all_cols]
 
-    df_cleaned = X_encoded.copy()
-    df_cleaned[target_col] = y.values
+    df = impute_missing_values(df)
+    df_encoded, encoders = encode_categoricals(df)
 
-    return df_cleaned, encoders
+    X = df_encoded.drop(columns=[target_col])
+    y = df_encoded[target_col]
+
+    return X, y, encoders
+
 
 # ----------------------
 # 4. Threshold Generator
