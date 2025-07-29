@@ -1,0 +1,76 @@
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, precision_recall_curve
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def run_rf_model(X_train, y_train, X_test, y_test, feature_names=None, plot_threshold=True, threshold_target_precision=0.75):
+    # Step 1: Fit Random Forest model
+    model = RandomForestClassifier(class_weight='balanced', random_state=42)
+    model.fit(X_train, y_train)
+    
+    # Step 2: Predict probabilities
+    y_proba = model.predict_proba(X_test)[:, 1]
+
+    # Step 3: Evaluate precision-recall vs thresholds
+    precision, recall, thresholds = precision_recall_curve(y_test, y_proba)
+    
+    # Optional: Plot precision-recall vs threshold
+    if plot_threshold:
+        plt.figure(figsize=(8, 5))
+        plt.plot(thresholds, precision[:-1], label="Precision")
+        plt.plot(thresholds, recall[:-1], label="Recall")
+        plt.xlabel("Threshold")
+        plt.ylabel("Score")
+        plt.grid()
+        plt.title("Precision-Recall vs Threshold")
+        plt.legend()
+        plt.show()
+
+    # Step 4: Find threshold where precision >= target
+    valid_idx = np.where(precision[:-1] >= threshold_target_precision)[0]
+    if len(valid_idx) > 0:
+        optimal_idx = valid_idx[np.argmax(recall[valid_idx])]
+        chosen_threshold = thresholds[optimal_idx]
+    else:
+        chosen_threshold = 0.5  # fallback
+        print("Warning: Could not reach target precision, using default threshold = 0.5")
+
+    print(f"\n✅ Chosen Threshold: {chosen_threshold:.3f} (Precision >= {threshold_target_precision})")
+
+    # Step 5: Final prediction based on chosen threshold
+    y_pred_custom = (y_proba >= chosen_threshold).astype(int)
+    print("\n📊 Classification Report (Custom Threshold):\n")
+    print(classification_report(y_test, y_pred_custom))
+
+    # Step 6: Identify top N features
+    importances = model.feature_importances_
+    feature_df = pd.DataFrame({
+        "feature": feature_names if feature_names is not None else X_train.columns,
+        "importance": importances
+    }).sort_values(by="importance", ascending=False)
+
+    print("\n🔥 Top 5 Features by Importance:\n")
+    print(feature_df.head(5))
+
+    # Step 7: Derive Rule Thresholds from flagged cases
+    flagged_cases = X_test.copy()
+    flagged_cases["proba"] = y_proba
+    flagged_cases["label"] = y_test
+    flagged = flagged_cases[flagged_cases["proba"] >= chosen_threshold]
+
+    rule_summary = []
+    top_features = feature_df["feature"].head(5).values
+    for feat in top_features:
+        if pd.api.types.is_numeric_dtype(X_test[feat]):
+            q90 = flagged[feat].quantile(0.9)
+            rule_summary.append((feat, f"> {q90:.2f}", f"90th percentile of flagged"))
+        else:
+            top_cats = flagged[feat].value_counts(normalize=True).head(3).index.tolist()
+            rule_summary.append((feat, f"in {top_cats}", "Top categories among flagged"))
+
+    rule_df = pd.DataFrame(rule_summary, columns=["Feature", "Condition", "Justification"])
+    print("\n🧾 Suggested SME Rules (Based on Flagged Records):\n")
+    print(rule_df)
+
+    return model, chosen_threshold, rule_df
