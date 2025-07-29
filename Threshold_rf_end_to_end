@@ -1,0 +1,124 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_recall_curve, classification_report
+from sklearn.impute import SimpleImputer
+import matplotlib.pyplot as plt
+
+# Step 1: Impute missing values
+def impute_missing_values(df):
+    num_cols = df.select_dtypes(include='number').columns
+    cat_cols = df.select_dtypes(include='object').columns
+
+    num_imputer = SimpleImputer(strategy='median')
+    cat_imputer = SimpleImputer(strategy='constant', fill_value='missing')
+
+    df[num_cols] = num_imputer.fit_transform(df[num_cols])
+    df[cat_cols] = cat_imputer.fit_transform(df[cat_cols])
+
+    return df
+
+# Step 2: Encode categoricals and keep mapping
+def encode_categoricals(df):
+    cat_cols = df.select_dtypes(include='object').columns
+    df_encoded = pd.get_dummies(df, drop_first=False)
+
+    cat_map = {
+        col: [c for c in df_encoded.columns if c.startswith(col + '_')]
+        for col in cat_cols
+    }
+    return df_encoded, cat_map
+
+# Step 3: Preprocessing pipeline
+def preprocess_df(df, target_col):
+    df = df.copy()
+    y = df[target_col]
+    X = df.drop(columns=[target_col])
+
+    X = impute_missing_values(X)
+    X_encoded, cat_map = encode_categoricals(X)
+
+    df_cleaned = X_encoded.copy()
+    df_cleaned[target_col] = y.values
+
+    return df_cleaned, cat_map
+
+# Step 4: Train-test split
+def split_train_test(df, target_col, test_size=0.2, random_state=42):
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+    return train_test_split(X, y, test_size=test_size, stratify=y, random_state=random_state)
+
+# Step 5: Run Random Forest model and generate rule logic
+def run_rf_model(X_train, y_train, X_test, y_test, feature_names=None, cat_map=None,
+                 plot_threshold=True, threshold_target_precision=0.75):
+    model = RandomForestClassifier(class_weight='balanced', random_state=42)
+    model.fit(X_train, y_train)
+
+    y_proba = model.predict_proba(X_test)[:, 1]
+    precision, recall, thresholds = precision_recall_curve(y_test, y_proba)
+
+    if plot_threshold:
+        plt.figure(figsize=(8, 5))
+        plt.plot(thresholds, precision[:-1], label="Precision")
+        plt.plot(thresholds, recall[:-1], label="Recall")
+        plt.xlabel("Threshold")
+        plt.ylabel("Score")
+        plt.grid()
+        plt.title("Precision-Recall vs Threshold")
+        plt.legend()
+        plt.show()
+
+    valid_idx = np.where(precision[:-1] >= threshold_target_precision)[0]
+    if len(valid_idx) > 0:
+        optimal_idx = valid_idx[np.argmax(recall[valid_idx])]
+        chosen_threshold = thresholds[optimal_idx]
+    else:
+        chosen_threshold = 0.5
+        print("⚠️ Using default threshold = 0.5")
+
+    print(f"\n✅ Chosen Threshold: {chosen_threshold:.3f} (Precision ≥ {threshold_target_precision})\n")
+    y_pred_custom = (y_proba >= chosen_threshold).astype(int)
+
+    print("📊 Classification Report:\n")
+    print(classification_report(y_test, y_pred_custom))
+
+    importances = model.feature_importances_
+    feature_df = pd.DataFrame({
+        "feature": feature_names if feature_names is not None else X_train.columns,
+        "importance": importances
+    }).sort_values(by="importance", ascending=False)
+
+    print("🔥 Top 5 Important Features:\n")
+    print(feature_df.head(5))
+
+    # Rule Summary
+    X_test_copy = X_test.copy()
+    X_test_copy["proba"] = y_proba
+    X_test_copy["true_label"] = y_test.values
+    flagged = X_test_copy[X_test_copy["proba"] >= chosen_threshold]
+
+    rule_summary = []
+    top_features = feature_df["feature"].head(5).values
+
+    for feat in top_features:
+        original_cat = None
+        if cat_map:
+            for k, v in cat_map.items():
+                if feat in v:
+                    original_cat = k
+                    break
+
+        if original_cat:
+            category_value = feat.replace(f"{original_cat}_", "")
+            rule_summary.append((original_cat, f"= '{category_value}'", "Flagged often in high-risk cases"))
+        elif pd.api.types.is_numeric_dtype(X_test[feat]):
+            q90 = flagged[feat].quantile(0.9)
+            rule_summary.append((feat, f"> {q90:.2f}", "90th percentile of flagged"))
+
+    rule_df = pd.DataFrame(rule_summary, columns=["Feature", "Condition", "Justification"])
+    print("\n🧾 Suggested Rules for SMEs:\n")
+    print(rule_df)
+
+    return model, chosen_threshold, rule_df
