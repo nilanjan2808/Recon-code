@@ -7,20 +7,32 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import classification_report, confusion_matrix, precision_recall_curve
 
-def plot_pr_with_intersection(y_true, y_scores):
+def plot_pr_with_two_points(y_true, y_scores):
     precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
-    
-    # Find closest point where precision and recall are nearly equal
+
+    # Find intersection point (closest precision=recall)
     diff = np.abs(precision - recall)
-    idx = np.argmin(diff)
+    idx_intersect = np.argmin(diff)
+    prec_intersect = precision[idx_intersect]
+    
+    # Find best recall with precision >= intersection precision
+    valid_indices = np.where(precision >= prec_intersect)[0]
+    idx_best_recall = valid_indices[np.argmax(recall[valid_indices])]
     
     plt.figure(figsize=(7,5))
     plt.plot(recall, precision, label='Precision-Recall curve', color='blue')
-    plt.scatter(recall[idx], precision[idx], color='red', zorder=5,
-                label=f'Intersection\nThreshold={thresholds[idx-1]:.3f}\nPrec={precision[idx]:.3f}\nRec={recall[idx]:.3f}')
+
+    # Intersection point in red
+    plt.scatter(recall[idx_intersect], precision[idx_intersect], color='red', zorder=5,
+                label=f'Intersection\nThresh={thresholds[idx_intersect-1]:.3f}\nPrec={precision[idx_intersect]:.3f}\nRec={recall[idx_intersect]:.3f}')
+
+    # Best recall without lowering precision in green
+    plt.scatter(recall[idx_best_recall], precision[idx_best_recall], color='green', zorder=5,
+                label=f'Best Recall w/o Precision Drop\nThresh={thresholds[idx_best_recall-1]:.3f}\nPrec={precision[idx_best_recall]:.3f}\nRec={recall[idx_best_recall]:.3f}')
+
     plt.xlabel('Recall')
     plt.ylabel('Precision')
-    plt.title('Precision-Recall Curve with Intersection Point')
+    plt.title('Precision-Recall Curve with Key Points')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -78,3 +90,47 @@ def run_rf_model(df, target_col, feature_cols=None, test_size=0.2, random_state=
     if cat_cols:
         X[cat_cols] = X[cat_cols].fillna('NA')
         for col in cat_cols:
+            le = LabelEncoder()
+            X[col] = le.fit_transform(X[col])
+            le_dict[col] = le
+
+    X = X[feature_cols]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, stratify=y, test_size=test_size, random_state=random_state
+    )
+
+    print("Target class distribution (train):", y_train.value_counts().to_dict())
+
+    clf = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=random_state)
+    clf.fit(X_train, y_train)
+
+    y_pred = clf.predict(X_test)
+    y_proba = clf.predict_proba(X_test)[:, 1]
+
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred))
+    print("Confusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
+
+    feature_importance = pd.Series(clf.feature_importances_, index=feature_cols).sort_values(ascending=False)
+    print("\nTop 10 Feature Importances:")
+    print(feature_importance.head(10))
+
+    rules = generate_rule_suggestions(X_train, y_train, feature_importance, le_dict, top_n=3)
+    print("\nSuggested Rules for Flagging Exceptions:")
+    for k, v in rules.items():
+        print(f"- {v}")
+
+    plot_pr_with_two_points(y_test, y_proba)
+
+    return {
+        'model': clf,
+        'X_train': X_train,
+        'y_train': y_train,
+        'X_test': X_test,
+        'y_test': y_test,
+        'feature_importance': feature_importance,
+        'rules': rules,
+        'y_proba': y_proba
+    }
