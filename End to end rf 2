@@ -5,51 +5,91 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import (
-    classification_report, confusion_matrix,
-    precision_recall_curve, average_precision_score
-)
+from sklearn.metrics import classification_report, confusion_matrix, precision_recall_curve
+
+def plot_pr_with_intersection(y_true, y_scores):
+    precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+    
+    # Find closest point where precision and recall are nearly equal
+    diff = np.abs(precision - recall)
+    idx = np.argmin(diff)
+    
+    plt.figure(figsize=(7,5))
+    plt.plot(recall, precision, label='Precision-Recall curve', color='blue')
+    plt.scatter(recall[idx], precision[idx], color='red', zorder=5,
+                label=f'Intersection\nThreshold={thresholds[idx-1]:.3f}\nPrec={precision[idx]:.3f}\nRec={recall[idx]:.3f}')
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title('Precision-Recall Curve with Intersection Point')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+def generate_rule_suggestions(X_train, y_train, feature_importance, le_dict, top_n=3):
+    rules = {}
+    num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+    top_features = feature_importance.head(top_n).index.tolist()
+
+    for feature in top_features:
+        if feature in num_cols:
+            pos_vals = X_train.loc[y_train == 1, feature]
+            if not pos_vals.empty:
+                threshold = pos_vals.quantile(0.1)
+                rules[feature] = f"{feature} >= {threshold:.3f}"
+        else:
+            pos_vals = X_train.loc[y_train == 1, feature]
+            if not pos_vals.empty:
+                counts = pos_vals.value_counts(normalize=True).head(3)
+                le = le_dict.get(feature, None)
+
+                if le:
+                    decoded = [le.inverse_transform([cat])[0] for cat in counts.index]
+                else:
+                    decoded = counts.index.astype(str).tolist()
+
+                cat_rules = []
+                for cat_label, freq in zip(decoded, counts.values):
+                    cat_rules.append(f"'{cat_label}' ({freq*100:.1f}%)")
+                rule_text = f"{feature} in top categories: " + ", ".join(cat_rules)
+                rules[feature] = rule_text
+
+    return rules
 
 def run_rf_model(df, target_col, feature_cols=None, test_size=0.2, random_state=42, n_estimators=100, max_depth=None):
     df = df.copy()
-
-    # Drop rows where target is missing
     df = df[~df[target_col].isnull()]
 
-    # Detect feature columns if not given
     if feature_cols is None:
         feature_cols = [col for col in df.columns if col != target_col]
 
     X = df[feature_cols]
     y = df[target_col]
 
-    # Separate numeric and categorical columns
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = [col for col in X.columns if col not in num_cols]
 
-    # Replace inf with nan
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    # Impute numeric with 0
     if num_cols:
         X[num_cols] = SimpleImputer(strategy='constant', fill_value=0).fit_transform(X[num_cols])
 
-    # Impute categorical with 'NA' and label encode
+    le_dict = {}
     if cat_cols:
         X[cat_cols] = X[cat_cols].fillna('NA')
         for col in cat_cols:
             le = LabelEncoder()
             X[col] = le.fit_transform(X[col])
+            le_dict[col] = le
 
     X = X[feature_cols]
 
-    # Train-test split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=test_size, random_state=random_state)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, stratify=y, test_size=test_size, random_state=random_state
+    )
 
-    # Class imbalance warning
     print("Target class distribution (train):", y_train.value_counts().to_dict())
 
-    # Train model
     clf = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=random_state)
     clf.fit(X_train, y_train)
 
@@ -61,40 +101,16 @@ def run_rf_model(df, target_col, feature_cols=None, test_size=0.2, random_state=
     print("Confusion Matrix:")
     print(confusion_matrix(y_test, y_pred))
 
-    # Feature Importance
-    importances = pd.Series(clf.feature_importances_, index=feature_cols).sort_values(ascending=False)
+    feature_importance = pd.Series(clf.feature_importances_, index=feature_cols).sort_values(ascending=False)
     print("\nTop 10 Feature Importances:")
-    print(importances.head(10))
+    print(feature_importance.head(10))
 
-    # Rule-based suggestion
-    top_features = importances.head(3).index.tolist()
-    rules = {}
-
-    for feature in top_features:
-        if feature in num_cols:
-            pos_vals = X_train.loc[y_train == 1, feature]
-            threshold = pos_vals.quantile(0.1)
-            rules[feature] = f"{feature} >= {threshold:.3f}"
-        else:
-            rules[feature] = f"{feature} in top categories"
-
+    rules = generate_rule_suggestions(X_train, y_train, feature_importance, le_dict, top_n=3)
     print("\nSuggested Rules for Flagging Exceptions:")
     for k, v in rules.items():
         print(f"- {v}")
 
-    # Precision-Recall Curve
-    precision, recall, thresholds = precision_recall_curve(y_test, y_proba)
-    avg_prec = average_precision_score(y_test, y_proba)
-
-    plt.figure(figsize=(8, 6))
-    plt.plot(recall, precision, label=f'AP = {avg_prec:.2f}')
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.title("Precision-Recall Curve")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    plot_pr_with_intersection(y_test, y_proba)
 
     return {
         'model': clf,
@@ -102,9 +118,8 @@ def run_rf_model(df, target_col, feature_cols=None, test_size=0.2, random_state=
         'y_train': y_train,
         'X_test': X_test,
         'y_test': y_test,
-        'feature_importance': importances,
+        'feature_importance': feature_importance,
         'rules': rules,
-        'precision': precision,
-        'recall': recall,
-        'thresholds': thresholds
+        'y_proba': y_proba
     }
+
