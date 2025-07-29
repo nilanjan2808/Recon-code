@@ -1,0 +1,34 @@
+def generate_rule_suggestions(X_train, y_train, feature_importance, le_dict, top_n=3):
+    rules = {}
+    num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+
+    top_features = feature_importance.head(top_n).index.tolist()
+
+    for feature in top_features:
+        if feature in num_cols:
+            # Numeric feature: use 10th percentile of positive class as threshold
+            pos_vals = X_train.loc[y_train == 1, feature]
+            if not pos_vals.empty:
+                threshold = pos_vals.quantile(0.1)
+                rules[feature] = f"{feature} >= {threshold:.3f}"
+        else:
+            # Categorical: find top 3 most frequent categories in positives
+            pos_vals = X_train.loc[y_train == 1, feature]
+            if not pos_vals.empty:
+                counts = pos_vals.value_counts(normalize=True).head(3)
+                le = le_dict.get(feature, None)
+
+                # Decode label encoded values to original labels if possible
+                if le:
+                    decoded = [le.inverse_transform([cat])[0] for cat in counts.index]
+                else:
+                    decoded = counts.index.astype(str).tolist()
+
+                # Prepare readable rule text
+                cat_rules = []
+                for cat_label, freq in zip(decoded, counts.values):
+                    cat_rules.append(f"'{cat_label}' ({freq*100:.1f}%)")
+                rule_text = f"{feature} in top categories: " + ", ".join(cat_rules)
+                rules[feature] = rule_text
+
+    return rules
