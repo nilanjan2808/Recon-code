@@ -102,23 +102,3 @@ def run_rf_model(X_train, y_train, X_test, y_test, feature_names=None, cat_map=N
     rule_summary = []
     top_features = feature_df["feature"].head(5).values
 
-    for feat in top_features:
-        original_cat = None
-        if cat_map:
-            for k, v in cat_map.items():
-                if feat in v:
-                    original_cat = k
-                    break
-
-        if original_cat:
-            category_value = feat.replace(f"{original_cat}_", "")
-            rule_summary.append((original_cat, f"= '{category_value}'", "Flagged often in high-risk cases"))
-        elif pd.api.types.is_numeric_dtype(X_test[feat]):
-            q90 = flagged[feat].quantile(0.9)
-            rule_summary.append((feat, f"> {q90:.2f}", "90th percentile of flagged"))
-
-    rule_df = pd.DataFrame(rule_summary, columns=["Feature", "Condition", "Justification"])
-    print("\n🧾 Suggested Rules for SMEs:\n")
-    print(rule_df)
-
-    return model, chosen_threshold, rule_df
