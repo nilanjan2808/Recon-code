@@ -1,0 +1,45 @@
+@app.callback(
+    Output('drilldown-tables-container', 'children'),
+    Input('drilldown-submit', 'n_clicks'),
+    State('anomaly-table', 'derived_virtual_selected_rows'),
+    State('anomaly-table', 'data'),
+    prevent_initial_call=True
+)
+def drilldown_callback(n_clicks, selected_rows, table_data):
+    if not selected_rows or not table_data:
+        return html.Div("No row selected.")
+
+    # Extract selected row (assumes one row selected)
+    selected_row = table_data[selected_rows[0]]
+    field1 = selected_row.get("Source Flag Column", None)
+    field2 = selected_row.get("Target Flag Column", None)
+
+    if not field1 or not field2:
+        return html.Div("Selected row doesn't contain required flag columns.")
+
+    # Assuming df1 and df2 are accessible here
+    try:
+        results = investigate_causality(df1, df2, field1, field2)
+    except Exception as e:
+        return html.Div(f"Error during causality investigation: {str(e)}")
+
+    # Prepare output tables with dynamic titles like cde_0, cde_1, ...
+    output_tables = []
+    for i, df in enumerate(results):
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+
+        output_tables.append(html.H5(f"cde_{i}"))
+        output_tables.append(dash_table.DataTable(
+            columns=[{"name": col, "id": col} for col in df.columns],
+            data=df.to_dict("records"),
+            page_size=10,
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left'}
+        ))
+        output_tables.append(html.Br())
+
+    if not output_tables:
+        return html.Div("No results to display from flag comparison.")
+
+    return output_tables
