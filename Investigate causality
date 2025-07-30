@@ -1,0 +1,61 @@
+def investigate_causality(df1, df2, selected_row, group_cols, value_col='book value', top_n_fields=5):
+    """
+    For a selected anomaly row, investigate which fields contribute to the anomaly
+    by drilling down into other dimensions. Returns up to `top_n_fields` DataFrames.
+
+    Each DataFrame contains:
+        - group_cols + drill_col
+        - Original Book Value
+        - Transformed Book Value
+        - difference
+        - pct_change
+
+    Parameters:
+    - df1, df2: Original and transformed datasets
+    - selected_row: one row (as Series) from anomaly summary
+    - group_cols: list of grouping columns
+    - value_col: column name to compare
+    - top_n_fields: number of top granular fields to return (default 5)
+
+    Returns:
+    - List of up to `top_n_fields` DataFrames, one for each key drill dimension
+    """
+
+    # Filter for selected context
+    condition = np.logical_and.reduce([df1[col] == selected_row[col] for col in group_cols])
+    df1_filtered = df1[condition].copy()
+    df2_filtered = df2[condition].copy()
+
+    # Candidate fields for drill-down
+    common_cols = set(df1_filtered.columns).intersection(df2_filtered.columns)
+    candidate_cols = [col for col in common_cols if col not in group_cols + [value_col, 'book_value']]
+
+    results = []
+
+    for drill_col in candidate_cols:
+        try:
+            g1 = df1_filtered.groupby(group_cols + [drill_col], dropna=False)[value_col].sum().reset_index().rename(columns={value_col: 'Original Book Value'})
+            g2 = df2_filtered.groupby(group_cols + [drill_col], dropna=False)[value_col].sum().reset_index().rename(columns={value_col: 'Transformed Book Value'})
+
+            merged = pd.merge(g1, g2, on=group_cols + [drill_col], how='outer').fillna(0)
+            merged['difference'] = merged['Original Book Value'] - merged['Transformed Book Value']
+            merged['pct_change'] = np.where(
+                merged['Original Book Value'] == 0,
+                100.0,
+                (merged['difference'] / merged['Original Book Value']) * 100
+            )
+            merged['pct_change'] = merged['pct_change'].map(lambda x: f"{x:.2f}")
+            merged['drill_col'] = drill_col
+
+            # Sort by absolute difference and reset index
+            merged['abs_diff'] = merged['difference'].abs()
+            merged = merged.sort_values(by='abs_diff', ascending=False).drop(columns='abs_diff').reset_index(drop=True)
+
+            results.append(merged)
+        except Exception:
+            continue
+
+        if len(results) == top_n_fields:
+            break
+
+    return results
