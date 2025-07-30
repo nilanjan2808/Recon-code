@@ -1,0 +1,41 @@
+def compare_flags(df, col1, col2, show_mismatches=False):
+    """
+    Compare two binary flag columns in a DataFrame.
+
+    Parameters:
+    - df: pandas DataFrame
+    - col1: First column name
+    - col2: Second column name
+    - show_mismatches: If True, returns mismatched rows
+
+    Returns:
+    - Dictionary with counts of:
+        - matching_0s
+        - matching_1s
+        - mismatches
+    - Optionally, the mismatched rows DataFrame
+    """
+
+    if col1 not in df.columns or col2 not in df.columns:
+        raise ValueError("One or both columns not found in DataFrame.")
+
+    # Ensure the columns contain only 0s and 1s
+    for col in [col1, col2]:
+        if not df[col].isin([0, 1]).all():
+            raise ValueError(f"Column {col} must contain only 0 and 1 values.")
+
+    matching_0s = ((df[col1] == 0) & (df[col2] == 0)).sum()
+    matching_1s = ((df[col1] == 1) & (df[col2] == 1)).sum()
+    mismatches = (df[col1] != df[col2]).sum()
+
+    result = {
+        "matching_0s": matching_0s,
+        "matching_1s": matching_1s,
+        "mismatches": mismatches
+    }
+
+    if show_mismatches:
+        mismatched_rows = df[df[col1] != df[col2]]
+        return result, mismatched_rows
+
+    return result
