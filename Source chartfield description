@@ -1,0 +1,33 @@
+import pandas as pd
+
+def summarize_by_description(df, description_list):
+    """
+    Summarizes metrics for each source chartfield description in the input list.
+
+    Returns a DataFrame with:
+    - source chartfield description
+    - Count of cadency == 0 and cadency == 1
+    - Count of severity == 'high'
+    - Count of impact score > 0.507
+    - Min and Max of impact score
+    - Count of cdy risk rating == 'high'
+    """
+    summary_rows = []
+
+    for desc in description_list:
+        subset = df[df['source chartfield description'] == desc]
+
+        summary = {
+            'source chartfield description': desc,
+            'cadency_0_count': (subset['cadency'] == 0).sum(),
+            'cadency_1_count': (subset['cadency'] == 1).sum(),
+            'severity_high_count': (subset['severity'].str.lower() == 'high').sum(),
+            'impact_score_gt_0.507_count': (subset['impact score'] > 0.507).sum(),
+            'impact_score_min': subset['impact score'].min(),
+            'impact_score_max': subset['impact score'].max(),
+            'cdy_risk_rating_high_count': (subset['cdy risk rating'].str.lower() == 'high').sum()
+        }
+
+        summary_rows.append(summary)
+
+    return pd.DataFrame(summary_rows)
