@@ -1,0 +1,16 @@
+def add_filler_country(country_ref, country_org, frp_years_key="frp_years"):
+    """
+    Wrapper for country-level configs.
+    Loops through all GB configs inside the country and applies add_filler.
+    """
+    updated_ref, updated_org = {}, {}
+
+    for gb in country_ref.keys():
+        if gb in country_org:  # ensure same GB exists in both
+            cfg_ref, cfg_org = add_filler(country_ref[gb], country_org[gb], frp_years_key)
+            updated_ref[gb], updated_org[gb] = cfg_ref, cfg_org
+        else:
+            # If GB missing in org, keep ref as is and org empty
+            updated_ref[gb], updated_org[gb] = country_ref[gb], country_org.get(gb, {})
+
+    return updated_ref, updated_org
