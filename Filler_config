@@ -1,0 +1,19 @@
+def _insert_filler(cfg, filler_year, frp_years_key="frp_years"):
+    """Insert a filler year at index 1 (second position)."""
+    cfg[frp_years_key].insert(1, filler_year)
+    cfg["rwa"].insert(1, cfg["rwa"][0])
+    cfg["pbt"].insert(1, 0)
+    cfg["tax_adjustment"].insert(1, 0)
+    cfg["raw_dta"].insert(1, 0)
+
+
+def add_filler(config_ref, config_org, frp_years_key="frp_years"):
+    """
+    Compare lengths of frp_years in two configs.
+    Whichever has fewer years, insert a filler year at index 1 (second position).
+    """
+    if len(config_ref[frp_years_key]) > len(config_org[frp_years_key]):
+        _insert_filler(config_org, config_ref[frp_years_key][1], frp_years_key)
+    elif len(config_org[frp_years_key]) > len(config_ref[frp_years_key]):
+        _insert_filler(config_ref, config_org[frp_years_key][1], frp_years_key)
+    return config_ref, config_org
