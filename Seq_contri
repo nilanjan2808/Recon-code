@@ -1,0 +1,269 @@
+import copy
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+
+
+# ---------- Filler helpers (compact) ----------
+def _insert_filler(cfg, filler_year, frp_years_key="frp_years"):
+    """Insert a filler at index 1 (second position)."""
+    cfg[frp_years_key].insert(1, filler_year)
+    cfg["rwa"].insert(1, cfg["rwa"][0])
+    cfg["pbt"].insert(1, 0)
+    cfg["tax_adjustment"].insert(1, 0)
+    cfg["raw_dta"].insert(1, 0)
+
+def add_filler(cfg_ref, cfg_org, frp_years_key="frp_years"):
+    """
+    Whichever has fewer years gets a filler year at index 1.
+    Filler year is taken from the longer config's year at index 1.
+    """
+    yrs_ref, yrs_org = cfg_ref[frp_years_key], cfg_org[frp_years_key]
+    if len(yrs_ref) > len(yrs_org):
+        _insert_filler(cfg_org, yrs_ref[1], frp_years_key)
+    elif len(yrs_org) > len(yrs_ref):
+        _insert_filler(cfg_ref, yrs_org[1], frp_years_key)
+    return cfg_ref, cfg_org
+
+def add_filler_country(country_ref, country_org, frp_years_key="frp_years"):
+    """
+    Apply add_filler for every GB present in both country configs.
+    Returns updated shallow copies (does not mutate inputs).
+    """
+    out_ref, out_org = {}, {}
+    for gb in country_ref:
+        if gb in country_org:
+            r, o = add_filler(copy.deepcopy(country_ref[gb]),
+                              copy.deepcopy(country_org[gb]),
+                              frp_years_key)
+            out_ref[gb], out_org[gb] = r, o
+        else:
+            out_ref[gb] = copy.deepcopy(country_ref[gb])
+            out_org[gb] = copy.deepcopy(country_org.get(gb, {}))
+    return out_ref, out_org
+# ---------------------------------------------
+
+
+def sequential_input_contribution(
+    config_ref,
+    config_org,
+    country_config_ref,
+    country_config_org,
+    settings,
+    val="viu",
+    sequential_inputs=None,
+    *,
+    number_to_gb=None,     # e.g., {1:"CMB", 2:"WPB", ...}; if None, uses config_ref["gb"] as-is
+    rollups=None,          # e.g., {"Total": ["CMB","WPB","GBM",...]}
+    frp_years_key="frp_years"
+):
+    """
+    Compute sequential input contributions from config_ref → config_org
+    for a given GB within country configs, returning a DataFrame and a Waterfall chart.
+
+    REQUIRED external functions (assumed available in your codebase):
+      - get_viu2(settings, country_cfg, gb) -> dict with keys: 'viu','dtv','carrying_value','headroom'
+      - get_carrying_value2(settings, country_cfg, gb) -> {'carrying_value': ...}
+      - get_headroom2(settings, country_cfg, gb) -> {'viu','dtv','carrying_value','headroom'}
+      - create_adjusted_config(cfg)
+      - create_adjusted_country_config(country_cfg)
+      - flatten_config(cfg, index_only=True)
+      - rename_to_terminal(flat_cfg)
+      - collapse_config(flat_cfg)
+      - calculate_projections_tax(gb_cfg, country_cfg, settings, projections=False)
+      - update_all_gbs(country_cfg_ref, country_cfg_org, input_keys_used_collapsed)
+      - create_rollup_configs(country_cfg, rollups)
+      - update_by_c_and_rollup(country_cfg_org, new_country_cfg, input_keys_used, rollups, settings)
+      - recalculate_rwa_perc(country_cfg)
+      - format_column_name(val) -> str
+
+    Returns
+    -------
+    df: pandas.DataFrame
+        Per-step metrics with cumulative labels.
+    fig: plotly.graph_objects.Figure
+        Waterfall chart of sequential contributions.
+    """
+    if not sequential_inputs:
+        return pd.DataFrame(), go.Figure()
+
+    # ---- 1) FILLER ALIGNMENT (once, upfront) ----
+    # Align the single-GB configs
+    cfg_ref_aligned, cfg_org_aligned = add_filler(copy.deepcopy(config_ref),
+                                                  copy.deepcopy(config_org),
+                                                  frp_years_key)
+    # Align the country-level configs GB-by-GB
+    country_ref_aligned, country_org_aligned = add_filler_country(
+        copy.deepcopy(country_config_ref),
+        copy.deepcopy(country_config_org),
+        frp_years_key
+    )
+
+    # ---- 2) Resolve GB identifier ----
+    gb_raw = cfg_ref_aligned.get("gb")
+    gb = number_to_gb.get(gb_raw, gb_raw) if number_to_gb else gb_raw
+
+    # ---- 3) Select the calculator for the requested val ----
+    function_mapping = {
+        "viu": get_viu2,
+        "dtv": get_viu2,
+        "carrying_value": get_carrying_value2,
+        "headroom": get_headroom2,
+    }
+    if val not in function_mapping:
+        raise ValueError(f"Unsupported val='{val}'. Choose from {list(function_mapping)}")
+
+    cal_fn = function_mapping[val]
+
+    # Baseline & current totals for the chosen metric
+    cal_ref_0 = cal_fn(settings, country_ref_aligned, gb)
+    cal_org_0 = cal_fn(settings, country_org_aligned, gb)
+    his_val = cal_ref_0[val]
+    curr_val = cal_org_0[val]
+
+    # ---- 4) Prepare adjusted & flat configs ----
+    adj_cfg_org  = create_adjusted_config(copy.deepcopy(cfg_org_aligned))
+    adj_cfg_ref  = create_adjusted_config(copy.deepcopy(cfg_ref_aligned))
+
+    adj_cty_org  = create_adjusted_country_config(copy.deepcopy(country_org_aligned))
+    adj_cty_ref  = create_adjusted_country_config(copy.deepcopy(country_ref_aligned))
+
+    flat_org = rename_to_terminal(flatten_config(adj_cfg_org, index_only=True))
+    flat_ref = rename_to_terminal(flatten_config(adj_cfg_ref, index_only=True))
+
+    base_config     = copy.deepcopy(flat_ref)
+    target_config   = copy.deepcopy(flat_org)
+    cumulative_conf = copy.deepcopy(base_config)
+
+    # ---- 5) Sequential application of inputs ----
+    pbt_reached = False
+    dta_reached = False
+    input_keys_used = []
+
+    df = pd.DataFrame(
+        columns=[
+            "Change Type", "Reference viu", "DTV", "VIU",
+            "Carrying Value", "Headroom", "Current viu", "Sequential Contribution"
+        ]
+    )
+
+    for i, k in enumerate(sequential_inputs):
+        # Apply all terminal keys that match this input (exact or prefix 'k|...')
+        for sub_key in list(target_config.keys()):
+            if sub_key == k or sub_key.startswith(k + "|"):
+                cumulative_conf[sub_key] = target_config[sub_key]
+                adj_cty_ref[gb] = collapse_config(cumulative_conf)
+                input_keys_used.append(sub_key)
+
+        new_cty_ref = adj_cty_ref
+
+        # raw_dta reached → recompute tax projections for this GB
+        if k == "raw_dta":
+            dta_reached = True
+        if dta_reached:
+            new_cty_ref[gb] = calculate_projections_tax(
+                new_cty_ref[gb], new_cty_ref, settings, projections=False
+            )
+
+        # pbt reached → push updates to all GBs, recalc tax for this GB
+        if k == "pbt":
+            pbt_reached = True
+        if pbt_reached:
+            input_keys_used_collapsed = list(
+                dict.fromkeys(x.split("|")[0] for x in input_keys_used)
+            )
+            new_cty_ref = update_all_gbs(
+                new_cty_ref, adj_cty_org, input_keys_used_collapsed
+            )
+            new_cty_ref[gb] = calculate_projections_tax(
+                new_cty_ref[gb], new_cty_ref, settings, projections=False
+            )
+
+        # rollups & cross-updates
+        if rollups:
+            new_cty_ref = create_rollup_configs(new_cty_ref, rollups)
+            if gb in rollups:
+                new_cty_ref = update_by_c_and_rollup(
+                    copy.deepcopy(country_org_aligned),
+                    copy.deepcopy(new_cty_ref),
+                    input_keys_used,
+                    rollups,
+                    settings
+                )
+
+        # recalc perc
+        new_cty_ref = recalculate_rwa_perc(new_cty_ref)
+
+        # Compute metrics snapshot for this step
+        cal = get_headroom2(settings, new_cty_ref, gb)
+        viu = cal["viu"]
+        carrying_value = cal["carrying_value"]
+        dtv = cal["dtv"]
+        headroom = cal["headroom"]
+
+        # Build cumulative label (unique order-preserving)
+        clean = []
+        for t in (s.split("|")[0] for s in input_keys_used):
+            if t not in clean:
+                clean.append(t)
+        label = "|".join(clean)
+
+        df.loc[i] = {
+            "Change Type": label,
+            "Reference viu": his_val,
+            "DTV": dtv,
+            "VIU": viu,
+            "Carrying Value": carrying_value,
+            "Headroom": headroom,
+            "Current viu": curr_val,
+            "Sequential Contribution": None
+        }
+
+    # ---- 6) Compute contributions & Waterfall ----
+    if len(df) > 0:
+        # first step contribution vs baseline, then diffs
+        contrib = [df["VIU"].iloc[0] - his_val]
+        if len(df) > 1:
+            contrib += (df["VIU"].diff().iloc[1:]).tolist()
+        df["Sequential Contribution"] = pd.Series(contrib)
+
+        labels_steps = df["Change Type"].tolist()
+        # show only the tail token for mid steps
+        short_labels = [lbl.split("|")[-1] if 0 < i < len(labels_steps) - 1 else lbl
+                        for i, lbl in enumerate(labels_steps)]
+
+        x = ["Reference VIU"] + short_labels + ["Current VIU"]
+        y = [his_val] + contrib + [curr_val]
+        measure = ["absolute"] + ["relative"] * len(labels_steps) + ["total"]
+    else:
+        x = ["Reference VIU", "Current VIU"]
+        y = [his_val, curr_val]
+        measure = ["absolute", "total"]
+
+    fig = go.Figure(go.Waterfall(
+        x=x,
+        y=y,
+        measure=measure,
+        base=0,
+        orientation="v",
+        textposition="outside",
+        increasing=dict(marker=dict(color=px.colors.qualitative.Pastel[0])),
+        decreasing=dict(marker=dict(color=px.colors.qualitative.Pastel[2])),
+        totals=dict(marker=dict(color=px.colors.qualitative.Pastel[3]))
+    ))
+    fig.update_layout(
+        title=(
+            f"Sequential Contribution of Inputs to Change in {format_column_name(val)} "
+            f"from {int(his_val):,} mn LCY to {int(curr_val):,} mn LCY"
+        ),
+        xaxis_title="Input",
+        yaxis_title=f"Change in {format_column_name(val)}",
+        height=600,
+        showlegend=False
+    )
+
+    return df, fig
+
+
+# Backward-compatible alias (if your code calls the old name)
+sequentialInputContribution = sequential_input_contribution
