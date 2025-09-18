@@ -1,0 +1,58 @@
+import pandas as pd
+
+def prep_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cleans and prepares the input dataframe.
+    Steps:
+    1. Combine all custom_cde columns into a single 'attribute' column.
+    2. Drop rows where attribute is null/empty/['None'].
+    3. Drop rows where grca_id is missing or adj_amount = 0.
+    """
+
+    # Identify custom CDE columns
+    custom_cols = [col for col in df.columns if "custom_cde" in col.lower()]
+
+    # Melt to long format to combine attributes
+    df_long = df.melt(
+        id_vars=[c for c in df.columns if c not in custom_cols],
+        value_vars=custom_cols,
+        var_name="custom_cde",
+        value_name="attribute"
+    )
+
+    # Clean attribute values
+    df_long["attribute"] = df_long["attribute"].astype(str).str.strip().str.lower()
+    df_long = df_long[~df_long["attribute"].isin(["none", "nan", "[none]", "", "null"])]
+
+    # Drop invalid rows
+    df_long = df_long.dropna(subset=["grca_id"])
+    df_long = df_long[df_long["adj_amount"] != 0]
+
+    return df_long
+
+
+def summary_by_attribute(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize adjustment by attribute."""
+    result = (df.groupby("attribute")
+                .agg(count=("adj_amount", "size"), total_adj_amount=("adj_amount", "sum"))
+                .reset_index()
+                .sort_values(["count", "total_adj_amount"], ascending=[False, False]))
+    return result
+
+
+def summary_by_grca(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize adjustment by grca_id."""
+    result = (df.groupby("grca_id")
+                .agg(count=("adj_amount", "size"), total_adj_amount=("adj_amount", "sum"))
+                .reset_index()
+                .sort_values(["count", "total_adj_amount"], ascending=[False, False]))
+    return result
+
+
+def summary_by_desc(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize adjustment by adjustment_desc."""
+    result = (df.groupby("adjustment_desc")
+                .agg(count=("adj_amount", "size"), total_adj_amount=("adj_amount", "sum"))
+                .reset_index()
+                .sort_values(["count", "total_adj_amount"], ascending=[False, False]))
+    return result
