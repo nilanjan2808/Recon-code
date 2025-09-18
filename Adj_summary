@@ -4,31 +4,30 @@ def prep_data(df: pd.DataFrame, custom_prefix: str = "custom_cde", id_col: str =
     """
     Cleans and prepares the input dataframe.
     Steps:
-    1. Combine all custom_cde columns (or given prefix) into a single 'attribute' column.
-    2. Drop rows where attribute contains 'none' (case insensitive).
+    1. Combine all custom_cde columns (or given prefix) into a single comma-separated 'attribute' column.
+    2. Drop values containing 'none' (case insensitive) from attributes before merging.
     3. Drop rows where id_col is missing or amount_col = 0.
     """
 
     # Identify custom columns dynamically
     custom_cols = [col for col in df.columns if custom_prefix.lower() in col.lower()]
 
-    # Melt to long format to combine attributes
-    df_long = df.melt(
-        id_vars=[c for c in df.columns if c not in custom_cols],
-        value_vars=custom_cols,
-        var_name="custom_cde",
-        value_name="attribute"
-    )
+    # Create attribute column by merging all custom_cde values into comma-separated string
+    def merge_attributes(row):
+        vals = []
+        for col in custom_cols:
+            val = str(row[col]).strip().lower()
+            if val and "none" not in val:
+                vals.append(val)
+        return ", ".join(vals) if vals else None
 
-    # Clean attribute values
-    df_long["attribute"] = df_long["attribute"].astype(str).str.strip().str.lower()
-    df_long = df_long[~df_long["attribute"].str.contains("none", na=True)]
+    df["attribute"] = df.apply(merge_attributes, axis=1)
 
     # Drop invalid rows
-    df_long = df_long.dropna(subset=[id_col])
-    df_long = df_long[df_long[amount_col] != 0]
+    df = df.dropna(subset=[id_col, "attribute"])
+    df = df[df[amount_col] != 0]
 
-    return df_long
+    return df
 
 
 def summary_by_attribute(df: pd.DataFrame) -> pd.DataFrame:
@@ -56,3 +55,4 @@ def summary_by_desc(df: pd.DataFrame) -> pd.DataFrame:
                 .reset_index()
                 .sort_values(["count", "total_adj_amount"], ascending=[False, False]))
     return result
+
