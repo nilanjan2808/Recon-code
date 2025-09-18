@@ -1,16 +1,16 @@
 import pandas as pd
 
-def prep_data(df: pd.DataFrame) -> pd.DataFrame:
+def prep_data(df: pd.DataFrame, custom_prefix: str = "custom_cde", id_col: str = "grca_id", amount_col: str = "adj_amount") -> pd.DataFrame:
     """
     Cleans and prepares the input dataframe.
     Steps:
-    1. Combine all custom_cde columns into a single 'attribute' column.
-    2. Drop rows where attribute is null/empty/['None'].
-    3. Drop rows where grca_id is missing or adj_amount = 0.
+    1. Combine all custom_cde columns (or given prefix) into a single 'attribute' column.
+    2. Drop rows where attribute contains 'none' (case insensitive).
+    3. Drop rows where id_col is missing or amount_col = 0.
     """
 
-    # Identify custom CDE columns
-    custom_cols = [col for col in df.columns if "custom_cde" in col.lower()]
+    # Identify custom columns dynamically
+    custom_cols = [col for col in df.columns if custom_prefix.lower() in col.lower()]
 
     # Melt to long format to combine attributes
     df_long = df.melt(
@@ -22,11 +22,11 @@ def prep_data(df: pd.DataFrame) -> pd.DataFrame:
 
     # Clean attribute values
     df_long["attribute"] = df_long["attribute"].astype(str).str.strip().str.lower()
-    df_long = df_long[~df_long["attribute"].isin(["none", "nan", "[none]", "", "null"])]
+    df_long = df_long[~df_long["attribute"].str.contains("none", na=True)]
 
     # Drop invalid rows
-    df_long = df_long.dropna(subset=["grca_id"])
-    df_long = df_long[df_long["adj_amount"] != 0]
+    df_long = df_long.dropna(subset=[id_col])
+    df_long = df_long[df_long[amount_col] != 0]
 
     return df_long
 
