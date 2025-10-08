@@ -1,0 +1,75 @@
+import pandas as pd
+
+def summarize_adjustments(df):
+    # Identify GRCA columns
+    grca_cols = [col for col in df.columns if 'Custom GRCA' in col]
+
+    # Clean up: replace various 'none'-like values with empty string
+    none_like = ['None', 'none', '[None]', 'nan', 'NaN', None, '']
+    df[grca_cols] = df[grca_cols].applymap(lambda x: '' if str(x).strip() in none_like else str(x).strip())
+    df['Adj description'] = df['Adj description'].apply(lambda x: '' if str(x).strip() in none_like else str(x).strip())
+
+    # Create labeled combination key (e.g. "Custom GRCA 6 = Stage1 | Custom GRCA 7 = IPS_PP | Adj desc = Country reclass")
+    def make_labelled_combo(row):
+        parts = []
+        for col in grca_cols:
+            if row[col] != '':
+                parts.append(f"{col} = {row[col]}")
+        if row['Adj description'] != '':
+            parts.append(f"Adj desc = {row['Adj description']}")
+        return " | ".join(parts) if parts else "No Attributes"
+
+    df['combination_key'] = df.apply(make_labelled_combo, axis=1)
+
+    # Group and summarize
+    summary = df.groupby('combination_key', dropna=False).agg(
+        count=('Adj Amt', 'count'),
+        sum_positive_amt=('Adj Amt', lambda x: x[x > 0].sum()),
+        sum_negative_amt=('Adj Amt', lambda x: x[x < 0].sum())
+    ).reset_index()
+
+    # Compute totals for percentage calculation
+    total_count = summary['count'].sum()
+    total_positive = summary['sum_positive_amt'].sum()
+    total_negative = summary['sum_negative_amt'].sum()
+
+    # Compute percentages
+    summary['%_of_total_count'] = (summary['count'] / total_count * 100).round(2)
+    summary['%_of_total_positive_amt'] = (
+        summary['sum_positive_amt'] / total_positive * 100
+    ).fillna(0).round(2)
+    summary['%_of_total_negative_amt'] = (
+        summary['sum_negative_amt'] / total_negative * 100
+    ).fillna(0).round(2)
+
+    # Sort by overall impact (abs positive + abs negative)
+    summary['impact_magnitude'] = summary['sum_positive_amt'].abs() + summary['sum_negative_amt'].abs()
+    summary = summary.sort_values('impact_magnitude', ascending=False).drop(columns='impact_magnitude')
+
+    return summary
+
+
+# -------------------------------
+# 🔹 Example Usage
+# -------------------------------
+data = {
+    'GRCA_Account': ['AA1101', 'AA1102', 'AA1103'],
+    'Custom GRCA 1': [None, None, None],
+    'Custom GRCA 2': [None, None, None],
+    'Custom GRCA 3': [None, None, None],
+    'Custom GRCA 4': ['XXX4', None, None],
+    'Custom GRCA 5': [None, None, None],
+    'Custom GRCA 6': ['Stage1', 'Stage2', 'XXX6'],
+    'Custom GRCA 7': ['IPS_PP', None, None],
+    'Custom GRCA 8': [None, None, None],
+    'Custom GRCA 9': ['ISO_HKG', 'ISO_CHN', None],
+    'Custom GRCA 10': [None, None, None],
+    'Custom GRCA 11': [None, None, None],
+    'Custom GRCA 12': [None, None, None],
+    'Adj description': ['Country reclass', 'Industry reclass', 'Stage clearance'],
+    'Adj Amt': [1000, -100, 5000]
+}
+
+df = pd.DataFrame(data)
+summary_df = summarize_adjustments(df)
+print(summary_df)
