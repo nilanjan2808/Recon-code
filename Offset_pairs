@@ -1,0 +1,66 @@
+import pandas as pd
+
+def find_offsetting_pairs_with_account_check(df,
+                                             account_col='GRCA_Account',
+                                             amt_col='Adj Amt',
+                                             desc_col='Adj description'):
+    """
+    Find +ve/-ve pairs of equal adjustment amounts for the same GRCA account,
+    then identify which Custom GRCA fields changed (from → to).
+
+    Returns:
+        pd.DataFrame with columns:
+            - GRCA_Account
+            - amount (absolute value)
+            - index_pos / index_neg
+            - changed_fields (list of "Custom GRCA N: old → new")
+            - adj_desc_pos / adj_desc_neg
+    """
+
+    df = df.copy()
+    grca_cols = [c for c in df.columns if 'Custom GRCA' in c]
+
+    # Normalize numeric field for matching
+    df[amt_col] = df[amt_col].round(2)
+
+    pairs = []
+
+    # Group by GRCA_Account for matching within account
+    for account, subdf in df.groupby(account_col):
+        pos_df = subdf[subdf[amt_col] > 0]
+        neg_df = subdf[subdf[amt_col] < 0]
+
+        # Create lookup of negative adjustments by absolute amount
+        neg_lookup = (
+            neg_df.groupby(neg_df[amt_col].abs())
+            .apply(lambda x: x.index.tolist())
+            .to_dict()
+        )
+
+        # Iterate over positive adjustments
+        for pos_idx, pos_row in pos_df.iterrows():
+            amt = abs(pos_row[amt_col])
+            if amt in neg_lookup and neg_lookup[amt]:
+                neg_idx = neg_lookup[amt].pop(0)
+                neg_row = df.loc[neg_idx]
+
+                # Compare Custom GRCA fields
+                changes = []
+                for c in grca_cols:
+                    val_pos = str(pos_row[c]).strip() if pd.notna(pos_row[c]) else None
+                    val_neg = str(neg_row[c]).strip() if pd.notna(neg_row[c]) else None
+                    if val_pos != val_neg:
+                        changes.append(f"{c}: {val_pos} → {val_neg}")
+
+                if changes:
+                    pairs.append({
+                        "GRCA_Account": account,
+                        "amount": amt,
+                        "index_pos": pos_idx,
+                        "index_neg": neg_idx,
+                        "changed_fields": changes,
+                        "adj_desc_pos": pos_row.get(desc_col, None),
+                        "adj_desc_neg": neg_row.get(desc_col, None)
+                    })
+
+    return pd.DataFrame(pairs)
