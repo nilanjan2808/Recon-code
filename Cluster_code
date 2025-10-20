@@ -1,0 +1,71 @@
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+def cluster_adjustments_from_offset_pairs(df, grca_cols=None, n_clusters=4):
+    """
+    Clusters adjustment patterns from the offsetting pair output.
+    Focuses only on which Custom GRCA fields changed.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Output of find_offsetting_pairs_with_account_check()
+    grca_cols : list
+        List of GRCA columns to analyze (default = all containing 'custom_grca')
+    n_clusters : int
+        Number of clusters for KMeans
+    
+    Returns:
+    --------
+    clustered_df : pd.DataFrame
+        Original DataFrame with cluster labels
+    cluster_summary : pd.DataFrame
+        Summary view of clusters
+    """
+    
+    # 🔹 Identify GRCA columns dynamically if not passed
+    if grca_cols is None:
+        grca_cols = [c for c in df.columns if 'custom_grca' in c.lower()]
+
+    df = df.copy()
+
+    # 🔹 Create a binary "which fields changed" signature
+    df['changed_grcas'] = df[grca_cols].apply(
+        lambda row: ' '.join([col for col, val in row.items() if pd.notna(val) and '→' in str(val)]),
+        axis=1
+    )
+
+    # 🔹 Combine adjustment description and changed GRCAs
+    if 'adj_description' in df.columns:
+        df['text'] = df['adj_description'].astype(str) + " | " + df['changed_grcas']
+    else:
+        df['text'] = df['changed_grcas']
+
+    # 🔹 TF-IDF encoding
+    vectorizer = TfidfVectorizer(stop_words='english')
+    X = vectorizer.fit_transform(df['text'])
+
+    # 🔹 KMeans clustering
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    df['cluster'] = kmeans.fit_predict(X)
+
+    # 🔹 Evaluate clustering quality
+    if n_clusters > 1:
+        score = silhouette_score(X, df['cluster'])
+        print(f"Silhouette Score: {score:.3f}")
+
+    # 🔹 Summarize clusters
+    cluster_summary = (
+        df.groupby('cluster')
+        .agg({
+            'adj_description': lambda x: ', '.join(x.unique()[:5]) if 'adj_description' in df.columns else 'N/A',
+            'changed_grcas': lambda x: ', '.join(x.unique()[:5]),
+            'grca_account': 'count'
+        })
+        .rename(columns={'grca_account': 'count_of_pairs'})
+        .reset_index()
+    )
+
+    return df, cluster_summary
