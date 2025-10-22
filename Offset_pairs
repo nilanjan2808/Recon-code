@@ -1,59 +1,59 @@
 import pandas as pd
+from itertools import combinations
 
-def detect_grca_changes(df, amount_col='adj_amount', grca_cols=None, tol=0.0001):
-    """
-    Detects offsetting +/- adjustment pairs and compares their GRCA custom columns.
-    Always keeps negative -> positive order.
+def summarize_adjustments(df):
+    # --- Identify GRCA columns ---
+    grca_cols = [col for col in df.columns if 'Custom GRCA' in col]
     
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Data containing adjustment amounts and GRCA columns.
-    amount_col : str
-        Column name for adjustment amount.
-    grca_cols : list
-        List of custom GRCA column names to compare.
-    tol : float
-        Numerical tolerance for equality in offsetting amounts.
-
-    Returns
-    -------
-    pd.DataFrame : Summary of GRCA changes per matched pair.
-    """
-    if grca_cols is None:
-        grca_cols = [col for col in df.columns if 'custom_grca' in col.lower()]
+    # --- Replace 'None' or NaN with empty string for clarity ---
+    df[grca_cols] = df[grca_cols].fillna('').replace('None', '')
     
-    # Round or use tolerance to find exact opposite pairs
-    temp = df.copy()
-    temp['_abs_amt'] = temp[amount_col].abs()
-
-    # Group by absolute amount (pairs)
-    results = []
-    grouped = temp.groupby('_abs_amt')
-
-    for amt, group in grouped:
-        if len(group) >= 2:
-            # Split +ve and -ve
-            neg_rows = group[group[amount_col] < -tol]
-            pos_rows = group[group[amount_col] > tol]
-            for _, neg in neg_rows.iterrows():
-                for _, pos in pos_rows.iterrows():
-                    # Found a valid pair
-                    change_dict = {'abs_amount': amt}
-                    for col in grca_cols:
-                        from_val = str(neg[col]).strip()
-                        to_val = str(pos[col]).strip()
-                        if from_val.lower() == 'none':
-                            from_val = None
-                        if to_val.lower() == 'none':
-                            to_val = None
-                        if from_val != to_val:
-                            change_dict[col] = f"{from_val} → {to_val}"
-                    if len(change_dict) > 1:  # means at least one change
-                        results.append(change_dict)
-
-    result_df = pd.DataFrame(results)
-    if not result_df.empty:
-        result_df = result_df.reset_index(drop=True)
+    # --- Create a combination key (concatenate all non-empty GRCA + Adj description) ---
+    df['combination_key'] = df[grca_cols].apply(
+        lambda row: '_'.join(sorted([x for x in row if x])) if any(row) else 'No_GRCA', axis=1
+    ) + '_' + df['Adj description']
     
-    return result_df
+    # --- Group and aggregate ---
+    summary = df.groupby('combination_key').agg(
+        count=('Adj Amt', 'count'),
+        total_adj_amt=('Adj Amt', 'sum'),
+        total_positive_amt=('Adj Amt', lambda x: x[x > 0].sum()),
+        total_negative_amt=('Adj Amt', lambda x: x[x < 0].sum())
+    ).reset_index()
+    
+    # --- Sort by magnitude of total adjustment ---
+    summary['abs_total'] = summary['total_adj_amt'].abs()
+    summary = summary.sort_values('abs_total', ascending=False).drop(columns='abs_total')
+
+    # --- Split combination into readable parts ---
+    split_cols = summary['combination_key'].str.split('_', expand=True)
+    split_cols.columns = [f'Part_{i+1}' for i in range(split_cols.shape[1])]
+    summary = pd.concat([split_cols, summary.drop(columns='combination_key')], axis=1)
+
+    return summary
+
+
+# -------------------------------
+# 🔹 Example Usage
+# -------------------------------
+data = {
+    'GRCA_Account': ['AA1101', 'AA1102', 'AA1103'],
+    'Custom GRCA 1': [None, None, None],
+    'Custom GRCA 2': [None, None, None],
+    'Custom GRCA 3': [None, None, None],
+    'Custom GRCA 4': ['XXX4', None, None],
+    'Custom GRCA 5': [None, None, None],
+    'Custom GRCA 6': ['Stage1', 'Stage2', 'XXX6'],
+    'Custom GRCA 7': ['IPS_PP', None, None],
+    'Custom GRCA 8': [None, None, None],
+    'Custom GRCA 9': ['ISO_HKG', 'ISO_CHN', None],
+    'Custom GRCA 10': [None, None, None],
+    'Custom GRCA 11': [None, None, None],
+    'Custom GRCA 12': [None, None, None],
+    'Adj description': ['Country reclass', 'Industry reclass', 'Stage clearance'],
+    'Adj Amt': [1000, -100, 5000]
+}
+
+df = pd.DataFrame(data)
+summary_df = summarize_adjustments(df)
+print(summary_df)
