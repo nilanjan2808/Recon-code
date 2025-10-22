@@ -1,59 +1,53 @@
 import pandas as pd
-from itertools import combinations
 
-def summarize_adjustments(df):
-    # --- Identify GRCA columns ---
-    grca_cols = [col for col in df.columns if 'Custom GRCA' in col]
-    
-    # --- Replace 'None' or NaN with empty string for clarity ---
-    df[grca_cols] = df[grca_cols].fillna('').replace('None', '')
-    
-    # --- Create a combination key (concatenate all non-empty GRCA + Adj description) ---
-    df['combination_key'] = df[grca_cols].apply(
-        lambda row: '_'.join(sorted([x for x in row if x])) if any(row) else 'No_GRCA', axis=1
-    ) + '_' + df['Adj description']
-    
-    # --- Group and aggregate ---
-    summary = df.groupby('combination_key').agg(
-        count=('Adj Amt', 'count'),
-        total_adj_amt=('Adj Amt', 'sum'),
-        total_positive_amt=('Adj Amt', lambda x: x[x > 0].sum()),
-        total_negative_amt=('Adj Amt', lambda x: x[x < 0].sum())
-    ).reset_index()
-    
-    # --- Sort by magnitude of total adjustment ---
-    summary['abs_total'] = summary['total_adj_amt'].abs()
-    summary = summary.sort_values('abs_total', ascending=False).drop(columns='abs_total')
+def find_offsetting_pairs_with_account_check(df, amount_col='adj_amount', grca_cols=None, tol=1e-6):
+    """
+    Find +ve/-ve offsetting pairs for the same GRCA account and record what changed.
+    Now returns two separate columns:
+        1. changed_fields  -> which GRCA columns changed
+        2. changed_values  -> from → to details for those fields
+    """
+    if grca_cols is None:
+        grca_cols = [c for c in df.columns if 'custom_grca' in c.lower()]
 
-    # --- Split combination into readable parts ---
-    split_cols = summary['combination_key'].str.split('_', expand=True)
-    split_cols.columns = [f'Part_{i+1}' for i in range(split_cols.shape[1])]
-    summary = pd.concat([split_cols, summary.drop(columns='combination_key')], axis=1)
+    df = df.copy()
+    df['_abs_amt'] = df[amount_col].abs()
+    results = []
 
-    return summary
+    for (acct, amt), g in df.groupby(['grca_account', '_abs_amt']):
+        neg = g[g[amount_col] < -tol]
+        pos = g[g[amount_col] > tol]
 
+        if len(neg) > 0 and len(pos) > 0:
+            for _, neg_row in neg.iterrows():
+                for _, pos_row in pos.iterrows():
+                    change = {
+                        'grca_account': acct,
+                        'abs_amount': amt,
+                        'adj_description': pos_row.get('adj_description', None)
+                    }
 
-# -------------------------------
-# 🔹 Example Usage
-# -------------------------------
-data = {
-    'GRCA_Account': ['AA1101', 'AA1102', 'AA1103'],
-    'Custom GRCA 1': [None, None, None],
-    'Custom GRCA 2': [None, None, None],
-    'Custom GRCA 3': [None, None, None],
-    'Custom GRCA 4': ['XXX4', None, None],
-    'Custom GRCA 5': [None, None, None],
-    'Custom GRCA 6': ['Stage1', 'Stage2', 'XXX6'],
-    'Custom GRCA 7': ['IPS_PP', None, None],
-    'Custom GRCA 8': [None, None, None],
-    'Custom GRCA 9': ['ISO_HKG', 'ISO_CHN', None],
-    'Custom GRCA 10': [None, None, None],
-    'Custom GRCA 11': [None, None, None],
-    'Custom GRCA 12': [None, None, None],
-    'Adj description': ['Country reclass', 'Industry reclass', 'Stage clearance'],
-    'Adj Amt': [1000, -100, 5000]
-}
+                    changed_fields = []
+                    changed_values = []
 
-df = pd.DataFrame(data)
-summary_df = summarize_adjustments(df)
-print(summary_df)
+                    for col in grca_cols:
+                        from_val = str(neg_row[col]).strip().lower()
+                        to_val = str(pos_row[col]).strip().lower()
+
+                        # Normalize 'none'
+                        if 'none' in from_val:
+                            from_val = None
+                        if 'none' in to_val:
+                            to_val = None
+
+                        if from_val != to_val:
+                            changed_fields.append(col)
+                            changed_values.append(f"{col}: {from_val} → {to_val}")
+
+                    if changed_fields:
+                        change['changed_fields'] = ', '.join(changed_fields)
+                        change['changed_values'] = ' | '.join(changed_values)
+                        results.append(change)
+
+    return pd.DataFrame(results).reset_index(drop=True)
+
