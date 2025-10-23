@@ -1,30 +1,33 @@
 import pandas as pd
-
-# List your 11 GRCA columns here
 import pandas as pd
 
-# Replace with actual GRCA column names
+# List all GRCA columns here
 grca_cols = ['GRCA1','GRCA2','GRCA3','GRCA4','GRCA5',
              'GRCA6','GRCA7','GRCA8','GRCA9','GRCA10','GRCA11']
 
-def get_hit_numbers(group):
-    hits = group[grca_cols].replace('None', pd.NA).stack().unique()
-    nums = [val.replace("GRCA","") for val in hits]
-    return ", ".join(sorted(nums, key=int)) if len(nums) > 0 else ""
+def get_hit_columns(group):
+    hit_nums = []
+    for col in grca_cols:
+        # Check if any cell in this col (for this cluster) is NOT "None"
+        if group[col].ne("None").any():
+            num = col.replace("GRCA", "")  # extract number from header
+            hit_nums.append(num)
+
+    return ", ".join(hit_nums) if hit_nums else ""
+
 
 def get_adj_desc(group):
     desc = group['adj_description'].dropna().unique()
     return ", ".join(sorted(desc)) if len(desc) > 0 else ""
 
+
 summary_df = (
     df.groupby('cluster')
       .apply(lambda g: pd.Series({
-          'GRCA_hit_numbers': get_hit_numbers(g),
+          'GRCA_hit_numbers': get_hit_columns(g),
           'adj_description': get_adj_desc(g)
       }))
       .reset_index()
 )
-
-print(summary_df)
 
 print(summary_df)
