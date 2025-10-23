@@ -1,32 +1,30 @@
 import pandas as pd
 
 # List your 11 GRCA columns here
-grca_cols = ['GRCA1', 'GRCA2', 'GRCA3', 'GRCA4', 'GRCA5',
-             'GRCA6', 'GRCA7', 'GRCA8', 'GRCA9', 'GRCA10', 'GRCA11']
+import pandas as pd
 
+# Replace with actual GRCA column names
+grca_cols = ['GRCA1','GRCA2','GRCA3','GRCA4','GRCA5',
+             'GRCA6','GRCA7','GRCA8','GRCA9','GRCA10','GRCA11']
 
-def get_hit_numbers(x):
-    # Stack all GRCA columns → filter → unique
-    hits = x[grca_cols].replace('None', pd.NA).stack().unique()
+def get_hit_numbers(group):
+    hits = group[grca_cols].replace('None', pd.NA).stack().unique()
+    nums = [val.replace("GRCA","") for val in hits]
+    return ", ".join(sorted(nums, key=int)) if len(nums) > 0 else ""
 
-    # Convert `GRCA5` → `5`
-    nums = [val.replace("GRCA", "") for val in hits]
-    return ", ".join(sorted(nums, key=int))
-
-
-def get_adj_desc(x):
-    # Remove NA & duplicates, join comma separated
-    desc = sorted(set(x.dropna()))
-    return ", ".join(desc)
-
+def get_adj_desc(group):
+    desc = group['adj_description'].dropna().unique()
+    return ", ".join(sorted(desc)) if len(desc) > 0 else ""
 
 summary_df = (
     df.groupby('cluster')
-      .agg(
-          GRCA_hit_numbers = (lambda x: get_hit_numbers(df.loc[x.index])),
-          adj_description  = ('adj_description', get_adj_desc)
-      )
+      .apply(lambda g: pd.Series({
+          'GRCA_hit_numbers': get_hit_numbers(g),
+          'adj_description': get_adj_desc(g)
+      }))
       .reset_index()
 )
+
+print(summary_df)
 
 print(summary_df)
