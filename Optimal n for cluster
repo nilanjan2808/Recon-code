@@ -1,0 +1,54 @@
+# 📦 Import libraries
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+
+# 🧩 Assume df is your dataset and you want to cluster on all numeric columns
+# If you have categorical columns, encode them first
+# Example: df_encoded = pd.get_dummies(df, drop_first=True)
+df_encoded = df.select_dtypes(include=['number'])  # only numeric columns
+
+# ⚙️ Scale the data for better clustering
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(df_encoded)
+
+# 📊 Range of clusters to test
+K = range(2, 11)
+
+wcss = []           # within-cluster sum of squares (for elbow method)
+sil_scores = []     # silhouette scores
+
+# 🔁 Compute metrics for each k
+for k in K:
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
+    labels = kmeans.fit_predict(X_scaled)
+    wcss.append(kmeans.inertia_)
+    sil = silhouette_score(X_scaled, labels)
+    sil_scores.append(sil)
+
+# 🎨 Plot Elbow Curve
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.plot(K, wcss, 'o-', linewidth=2, markersize=6)
+plt.title('Elbow Method (WCSS vs k)')
+plt.xlabel('Number of Clusters (k)')
+plt.ylabel('WCSS (Inertia)')
+plt.grid(True)
+
+# 🎨 Plot Silhouette Score Curve
+plt.subplot(1, 2, 2)
+plt.plot(K, sil_scores, 'o-', linewidth=2, markersize=6, color='orange')
+plt.title('Silhouette Score vs k')
+plt.xlabel('Number of Clusters (k)')
+plt.ylabel('Average Silhouette Score')
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# 🏁 Print best silhouette score
+best_k = K[sil_scores.index(max(sil_scores))]
+print(f"✅ Best number of clusters by silhouette score: {best_k}")
