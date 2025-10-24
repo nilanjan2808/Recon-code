@@ -3,8 +3,8 @@ import pandas as pd
 
 def create_mapping_table(df, col_name, folder_path):
     """
-    Creates a mapping table of unique values from df[col_name]
-    showing which files in folder_path contain them.
+    Create a mapping table showing which files in folder_path
+    contain (case-insensitive) matches for unique values from df[col_name].
 
     Args:
         df (pd.DataFrame): Input dataframe
@@ -15,40 +15,42 @@ def create_mapping_table(df, col_name, folder_path):
         pd.DataFrame: Mapping table with columns [col_name, 'files_found_in']
     """
     
-    # Step 1: Get unique values from column
-    unique_values = df[col_name].dropna().unique()
-    
+    unique_values = df[col_name].dropna().astype(str).unique()
     mapping = {val: [] for val in unique_values}
-    
-    # Step 2: Iterate over all files in the folder
+
     for file in os.listdir(folder_path):
         file_path = os.path.join(folder_path, file)
         
-        # Only read CSV or Excel files
+        # Read CSV or Excel only
         if file.endswith('.csv'):
             try:
-                temp_df = pd.read_csv(file_path)
+                temp_df = pd.read_csv(file_path, dtype=str, encoding='utf-8', errors='ignore')
             except Exception as e:
-                print(f"Error reading {file}: {e}")
+                print(f"⚠️ Error reading {file}: {e}")
                 continue
         elif file.endswith(('.xlsx', '.xls')):
             try:
-                temp_df = pd.read_excel(file_path)
+                temp_df = pd.read_excel(file_path, dtype=str)
             except Exception as e:
-                print(f"Error reading {file}: {e}")
+                print(f"⚠️ Error reading {file}: {e}")
                 continue
         else:
-            continue  # skip non-data files
-        
-        # Step 3: Check for matches in any column
+            continue
+
+        # Convert all text to lowercase for robust search
+        temp_df = temp_df.apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+
+        # Step 3: Search for each unique value
         for val in unique_values:
-            if temp_df.isin([val]).any().any():
+            v = str(val).lower().strip().replace('"', '').replace("'", "")
+            found = temp_df.apply(lambda col: col.astype(str).str.contains(v, na=False, case=False)).any().any()
+            if found:
                 mapping[val].append(file)
-    
-    # Step 4: Create mapping DataFrame
+
     mapping_df = pd.DataFrame([
         {col_name: key, 'files_found_in': ', '.join(value) if value else 'Not Found'}
         for key, value in mapping.items()
     ])
     
     return mapping_df
+
