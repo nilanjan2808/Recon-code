@@ -1,27 +1,30 @@
 import os
 import pandas as pd
 
-def create_mapping_table(df, col_name, folder_path):
+def create_mapping_table(df, col_name, folder_path, search_col):
     """
-    Create a mapping table showing which files in folder_path
-    contain (case-insensitive) matches for unique values from df[col_name].
+    Creates a mapping table showing which files in folder_path contain
+    (case-insensitive substring) matches of unique values from df[col_name],
+    searching only within a specified column (search_col) in those files.
+    Also returns the corresponding target_system values from matched rows.
 
     Args:
         df (pd.DataFrame): Input dataframe
-        col_name (str): Column name to extract unique values from
+        col_name (str): Column in df containing values to search for
         folder_path (str): Folder containing data files (.csv/.xlsx)
+        search_col (str): Column name in the target files to search within
 
     Returns:
-        pd.DataFrame: Mapping table with columns [col_name, 'files_found_in']
+        pd.DataFrame: Mapping table with columns [col_name, 'files_found_in', 'target_system']
     """
-    
+
     unique_values = df[col_name].dropna().astype(str).unique()
-    mapping = {val: [] for val in unique_values}
+    mapping_rows = []
 
     for file in os.listdir(folder_path):
         file_path = os.path.join(folder_path, file)
-        
-        # Read CSV or Excel only
+
+        # Only handle CSV or Excel
         if file.endswith('.csv'):
             try:
                 temp_df = pd.read_csv(file_path, dtype=str, encoding='utf-8', errors='ignore')
@@ -37,20 +40,38 @@ def create_mapping_table(df, col_name, folder_path):
         else:
             continue
 
-        # Convert all text to lowercase for robust search
-        temp_df = temp_df.apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+        # Lowercase and strip the search column
+        if search_col not in temp_df.columns:
+            continue
+        temp_df[search_col] = temp_df[search_col].astype(str).str.lower().str.strip()
 
-        # Step 3: Search for each unique value
+        # Lowercase target_system if present
+        if 'target_system' in temp_df.columns:
+            temp_df['target_system'] = temp_df['target_system'].astype(str).str.strip()
+        else:
+            temp_df['target_system'] = 'Not Available'
+
+        # For each value in df[col_name], search for partial matches
         for val in unique_values:
-            v = str(val).lower().strip().replace('"', '').replace("'", "")
-            found = temp_df.apply(lambda col: col.astype(str).str.contains(v, na=False, case=False)).any().any()
-            if found:
-                mapping[val].append(file)
+            clean_val = str(val).lower().strip().replace('"', '').replace("'", "")
+            mask = temp_df[search_col].str.contains(clean_val, case=False, na=False)
+            if mask.any():
+                targets = temp_df.loc[mask, 'target_system'].unique().tolist()
+                mapping_rows.append({
+                    col_name: val,
+                    'files_found_in': file,
+                    'target_system': ', '.join(targets)
+                })
 
-    mapping_df = pd.DataFrame([
-        {col_name: key, 'files_found_in': ', '.join(value) if value else 'Not Found'}
-        for key, value in mapping.items()
-    ])
-    
-    return mapping_df
+    # If a value is not found anywhere, mark it
+    found_values = {row[col_name] for row in mapping_rows}
+    for val in unique_values:
+        if val not in found_values:
+            mapping_rows.append({
+                col_name: val,
+                'files_found_in': 'Not Found',
+                'target_system': 'Not Found'
+            })
+
+    return pd.DataFrame(mapping_rows)
 
