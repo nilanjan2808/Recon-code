@@ -1,0 +1,54 @@
+import os
+import pandas as pd
+
+def create_mapping_table(df, col_name, folder_path):
+    """
+    Creates a mapping table of unique values from df[col_name]
+    showing which files in folder_path contain them.
+
+    Args:
+        df (pd.DataFrame): Input dataframe
+        col_name (str): Column name to extract unique values from
+        folder_path (str): Folder containing data files (.csv/.xlsx)
+
+    Returns:
+        pd.DataFrame: Mapping table with columns [col_name, 'files_found_in']
+    """
+    
+    # Step 1: Get unique values from column
+    unique_values = df[col_name].dropna().unique()
+    
+    mapping = {val: [] for val in unique_values}
+    
+    # Step 2: Iterate over all files in the folder
+    for file in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, file)
+        
+        # Only read CSV or Excel files
+        if file.endswith('.csv'):
+            try:
+                temp_df = pd.read_csv(file_path)
+            except Exception as e:
+                print(f"Error reading {file}: {e}")
+                continue
+        elif file.endswith(('.xlsx', '.xls')):
+            try:
+                temp_df = pd.read_excel(file_path)
+            except Exception as e:
+                print(f"Error reading {file}: {e}")
+                continue
+        else:
+            continue  # skip non-data files
+        
+        # Step 3: Check for matches in any column
+        for val in unique_values:
+            if temp_df.isin([val]).any().any():
+                mapping[val].append(file)
+    
+    # Step 4: Create mapping DataFrame
+    mapping_df = pd.DataFrame([
+        {col_name: key, 'files_found_in': ', '.join(value) if value else 'Not Found'}
+        for key, value in mapping.items()
+    ])
+    
+    return mapping_df
