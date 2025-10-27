@@ -99,20 +99,3 @@ def find_offsetting_pairs_with_account_check(df, amount_col='adj_amount', grca_c
                             results.append(change)
 
     return pd.DataFrame(results).reset_index(drop=True)
-                        # Normalize 'none'
-                        if 'none' in from_val:
-                            from_val = None
-                        if 'none' in to_val:
-                            to_val = None
-
-                        if from_val != to_val:
-                            changed_fields.append(col)
-                            changed_values.append(f"{col}: {from_val} → {to_val}")
-
-                    if changed_fields:
-                        change['changed_fields'] = ', '.join(changed_fields)
-                        change['changed_values'] = ' | '.join(changed_values)
-                        results.append(change)
-
-    return pd.DataFrame(results).reset_index(drop=True)
-
