@@ -1,12 +1,16 @@
 import pandas as pd
+import re
 
 def find_offsetting_pairs_with_account_check(df, amount_col='adj_amount', grca_cols=None, tol=1e-6):
     """
     Find +ve/-ve offsetting pairs for the same GRCA account and record what changed.
-    Now returns two separate columns:
-        1. changed_fields  -> which GRCA columns changed
-        2. changed_values  -> from → to details for those fields
+
+    Updates:
+    1. 'changed_values' only includes the GRCA values (no column names).
+    2. Priority pairing: prefer pairs where the negative side has 'xxx' or 'None'
+       in any custom GRCA column — assuming it represents the base side.
     """
+
     if grca_cols is None:
         grca_cols = [c for c in df.columns if 'custom_grca' in c.lower()]
 
@@ -14,26 +18,87 @@ def find_offsetting_pairs_with_account_check(df, amount_col='adj_amount', grca_c
     df['_abs_amt'] = df[amount_col].abs()
     results = []
 
+    # --- Helper functions ---
+    def normalize_val(v):
+        """Normalize any textual or list-like None representation."""
+        if pd.isna(v):
+            return None
+        s = str(v).strip().lower()
+        if 'none' in s or s in ['nan', 'null', '', '[none]', '(none)']:
+            return None
+        return s
+
+    def has_xxx_or_none(s):
+        """Detect if value contains xxxN pattern or is None."""
+        if s is None:
+            return True
+        if re.search(r'xxx\d+', str(s)):
+            return True
+        return False
+
+    # --- Main grouping logic ---
     for (acct, amt), g in df.groupby(['grca_account', '_abs_amt']):
         neg = g[g[amount_col] < -tol]
         pos = g[g[amount_col] > tol]
 
         if len(neg) > 0 and len(pos) > 0:
+            paired = False
+
+            # --- Step 1: Priority pairing (xxx / None on negative side) ---
             for _, neg_row in neg.iterrows():
-                for _, pos_row in pos.iterrows():
-                    change = {
-                        'grca_account': acct,
-                        'abs_amount': amt,
-                        'adj_description': pos_row.get('adj_description', None)
-                    }
+                neg_vals = [normalize_val(neg_row[c]) for c in grca_cols]
+                if any(has_xxx_or_none(v) for v in neg_vals):  # ✅ priority condition
+                    for _, pos_row in pos.iterrows():
+                        change = {
+                            'grca_account': acct,
+                            'abs_amount': amt,
+                            'adj_description': pos_row.get('adj_description', None)
+                        }
 
-                    changed_fields = []
-                    changed_values = []
+                        changed_fields, changed_values = [], []
 
-                    for col in grca_cols:
-                        from_val = str(neg_row[col]).strip().lower()
-                        to_val = str(pos_row[col]).strip().lower()
+                        for col in grca_cols:
+                            from_val = normalize_val(neg_row[col])
+                            to_val = normalize_val(pos_row[col])
+                            if from_val != to_val:
+                                changed_fields.append(col)
+                                # ✅ only values
+                                changed_values.append(f"{from_val} → {to_val}")
 
+                        if changed_fields:
+                            change['changed_fields'] = ', '.join(changed_fields)
+                            change['changed_values'] = ' | '.join(changed_values)
+                            results.append(change)
+                            paired = True
+                            break
+                if paired:
+                    break
+
+            # --- Step 2: Fallback normal pairing if no priority match ---
+            if not paired:
+                for _, neg_row in neg.iterrows():
+                    for _, pos_row in pos.iterrows():
+                        change = {
+                            'grca_account': acct,
+                            'abs_amount': amt,
+                            'adj_description': pos_row.get('adj_description', None)
+                        }
+
+                        changed_fields, changed_values = [], []
+
+                        for col in grca_cols:
+                            from_val = normalize_val(neg_row[col])
+                            to_val = normalize_val(pos_row[col])
+                            if from_val != to_val:
+                                changed_fields.append(col)
+                                changed_values.append(f"{from_val} → {to_val}")
+
+                        if changed_fields:
+                            change['changed_fields'] = ', '.join(changed_fields)
+                            change['changed_values'] = ' | '.join(changed_values)
+                            results.append(change)
+
+    return pd.DataFrame(results).reset_index(drop=True)
                         # Normalize 'none'
                         if 'none' in from_val:
                             from_val = None
