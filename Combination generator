@@ -1,47 +1,109 @@
 import pandas as pd
-from itertools import combinations
+import numpy as np
 
-def find_balanced_groups(df, amount_col='adj_amount', group_cols=['grca_account', 'adj_description'], tol=1e-6):
+def find_offsetting_groups_hybrid(df, grca_col='grca_account', desc_col='adj_description',
+                                  amount_col='adj_amount', custom_cols=None, tol=1e-6):
+    """
+    Hybrid Greedy + Hash-based matching for offsetting adjustments.
+    Matches +ve and -ve adjustments within each (GRCA account, adj_description) group
+    and identifies changed customs, including split matches. Unmatched entries retained.
+    """
+
+    if custom_cols is None:
+        custom_cols = [c for c in df.columns if c.startswith('custom_')]
+
+    df = df.copy()
+    df['_abs_amt'] = df[amount_col].abs().round(6)
+    df['_used'] = False
     results = []
-    
-    # process each (grca_account, adj_description) combination
-    for keys, group in df.groupby(group_cols):
-        group = group.reset_index(drop=True)
-        used = set()
-        pos = group[group[amount_col] > 0]
-        neg = group[group[amount_col] < 0]
-        
-        # Step 1: Direct hash match (exact opposite pairs)
-        amt_map = {}
-        for i, row in group.iterrows():
-            val = round(row[amount_col], 6)
-            if -val in amt_map and amt_map[-val] not in used:
-                pair_idx = amt_map[-val]
-                used.add(i); used.add(pair_idx)
-                results.append(group.loc[[i, pair_idx]])
-            else:
-                amt_map[val] = i
-        
-        # Step 2: Greedy multi-split matches
-        remaining = group.loc[~group.index.isin(used)]
-        pos_rem = remaining[remaining[amount_col] > 0]
-        neg_rem = remaining[remaining[amount_col] < 0]
-        
-        for neg_idx, neg_row in neg_rem.iterrows():
-            target = -neg_row[amount_col]
-            pos_indices = pos_rem.index.tolist()
-            
-            # Try combinations of positives
-            for r in range(2, len(pos_indices) + 1):
-                for combo in combinations(pos_indices, r):
-                    combo_sum = pos_rem.loc[list(combo), amount_col].sum()
-                    if abs(combo_sum - target) < tol:
-                        used.update([neg_idx] + list(combo))
-                        results.append(group.loc[[neg_idx] + list(combo)])
-                        break
-                if neg_idx in used:
-                    break
 
-    # Combine all results
-    matched = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
-    return matched
+    # Group by both GRCA and Description
+    for (acc, desc), grp in df.groupby([grca_col, desc_col]):
+        grp = grp.reset_index(drop=True)
+        grp['_used'] = False
+
+        # --- (1) Hash-based exact matches ---
+        abs_groups = grp.groupby('_abs_amt')
+        for _, g in abs_groups:
+            if abs(g[amount_col].sum()) < tol and len(g) > 1:
+                grp.loc[g.index, '_used'] = True
+                diffs = []
+                for c in custom_cols:
+                    vals = g[c].dropna().unique()
+                    if len(vals) > 1:
+                        # Reverse direction of display
+                        vals = list(map(str, vals))
+                        diffs.append((c, f"{vals[-1]} → {vals[0]}"))
+                changed_cols = [d[0] for d in diffs]
+                changed_vals = [d[1] for d in diffs]
+
+                for _, r in g.iterrows():
+                    results.append({
+                        grca_col: acc,
+                        desc_col: desc,
+                        amount_col: r[amount_col],
+                        'changed_customs': ', '.join(changed_cols) if changed_cols else None,
+                        'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
+                    })
+
+        # --- (2) Greedy matching for splits ---
+        rem = grp[~grp['_used']].sort_values(amount_col).reset_index()
+        if not rem.empty:
+            pos = rem[rem[amount_col] > 0].to_dict('records')
+            neg = rem[rem[amount_col] < 0].to_dict('records')
+            i, j = 0, 0
+            used_indices = set()
+
+            while i < len(pos) and j < len(neg):
+                diff = pos[i][amount_col] + neg[j][amount_col]
+                if abs(diff) <= tol:
+                    g = pd.DataFrame([pos[i], neg[j]])
+                    diffs = []
+                    for c in custom_cols:
+                        vals = g[c].dropna().unique()
+                        if len(vals) > 1:
+                            vals = list(map(str, vals))
+                            diffs.append((c, f"{vals[-1]} → {vals[0]}"))
+                    changed_cols = [d[0] for d in diffs]
+                    changed_vals = [d[1] for d in diffs]
+                    for _, r in g.iterrows():
+                        results.append({
+                            grca_col: acc,
+                            desc_col: desc,
+                            amount_col: r[amount_col],
+                            'changed_customs': ', '.join(changed_cols) if changed_cols else None,
+                            'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
+                        })
+                    used_indices.update([i, j])
+                    i += 1
+                    j += 1
+                elif diff > 0:
+                    pos[i][amount_col] = diff
+                    j += 1
+                else:
+                    neg[j][amount_col] = diff
+                    i += 1
+
+            # Add remaining unmatched ones
+            for idx, r in enumerate(pos + neg):
+                if idx not in used_indices:
+                    results.append({
+                        grca_col: acc,
+                        desc_col: desc,
+                        amount_col: r[amount_col],
+                        'changed_customs': None,
+                        'changed_custom_values': None
+                    })
+
+    # --- (3) Handle completely unmatched groups ---
+    unmatched = df[(~df.index.isin(pd.Index([i for i in range(len(df))])))]
+    for _, r in unmatched.iterrows():
+        results.append({
+            grca_col: r[grca_col],
+            desc_col: r[desc_col],
+            amount_col: r[amount_col],
+            'changed_customs': None,
+            'changed_custom_values': None
+        })
+
+    return pd.DataFrame(results)
