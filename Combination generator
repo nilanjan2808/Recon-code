@@ -1,69 +1,47 @@
 import pandas as pd
-import numpy as np
+from itertools import combinations
 
-def find_offsetting_pairs_greedy_hash(df,
-                                      grca_col='grca_account',
-                                      amount_col='adj_amount',
-                                      desc_col='adj_description',
-                                      custom_cols=None,
-                                      tol=1e-6):
-    """
-    Finds offsetting adjustment pairs within each GRCA account using a hybrid greedy + hashing approach.
-    - Matches opposite-signed adjustments that sum to ~0.
-    - Identifies changed custom columns.
-    - Reverses direction of custom value changes (new → old).
-    - Adds combined adj_description ("desc1 ↔ desc2").
-    """
-
-    if custom_cols is None:
-        custom_cols = [c for c in df.columns if c.startswith('custom_')]
-
+def find_balanced_groups(df, amount_col='adj_amount', group_cols=['grca_account', 'adj_description'], tol=1e-6):
     results = []
+    
+    # process each (grca_account, adj_description) combination
+    for keys, group in df.groupby(group_cols):
+        group = group.reset_index(drop=True)
+        used = set()
+        pos = group[group[amount_col] > 0]
+        neg = group[group[amount_col] < 0]
+        
+        # Step 1: Direct hash match (exact opposite pairs)
+        amt_map = {}
+        for i, row in group.iterrows():
+            val = round(row[amount_col], 6)
+            if -val in amt_map and amt_map[-val] not in used:
+                pair_idx = amt_map[-val]
+                used.add(i); used.add(pair_idx)
+                results.append(group.loc[[i, pair_idx]])
+            else:
+                amt_map[val] = i
+        
+        # Step 2: Greedy multi-split matches
+        remaining = group.loc[~group.index.isin(used)]
+        pos_rem = remaining[remaining[amount_col] > 0]
+        neg_rem = remaining[remaining[amount_col] < 0]
+        
+        for neg_idx, neg_row in neg_rem.iterrows():
+            target = -neg_row[amount_col]
+            pos_indices = pos_rem.index.tolist()
+            
+            # Try combinations of positives
+            for r in range(2, len(pos_indices) + 1):
+                for combo in combinations(pos_indices, r):
+                    combo_sum = pos_rem.loc[list(combo), amount_col].sum()
+                    if abs(combo_sum - target) < tol:
+                        used.update([neg_idx] + list(combo))
+                        results.append(group.loc[[neg_idx] + list(combo)])
+                        break
+                if neg_idx in used:
+                    break
 
-    # process each GRCA account separately
-    for grca, grp in df.groupby(grca_col):
-        grp = grp.copy()
-        grp['_used'] = False
-
-        # hash table for fast lookups by rounded absolute value
-        hash_map = {}
-        for idx, row in grp.iterrows():
-            amt = round(abs(row[amount_col]), 6)
-            hash_map.setdefault(amt, []).append(idx)
-
-        # iterate over rows and greedily find matches
-        for idx, row in grp.iterrows():
-            if grp.at[idx, '_used']:
-                continue
-
-            amt = row[amount_col]
-            target_amt = -amt
-            key = round(abs(target_amt), 6)
-
-            # find candidate rows of opposite sign and not used yet
-            candidates = [i for i in hash_map.get(key, []) if not grp.at[i, '_used'] and np.sign(grp.at[i, amount_col]) != np.sign(amt)]
-            if not candidates:
-                continue
-
-            # choose the closest amount (greedy)
-            best_match = min(candidates, key=lambda i: abs(grp.at[i, amount_col] + amt))
-            total = grp.at[best_match, amount_col] + amt
-            if abs(total) <= tol:
-                grp.at[idx, '_used'] = True
-                grp.at[best_match, '_used'] = True
-
-                row2 = grp.loc[best_match]
-
-                # find changed custom columns
-                changed_cols = [c for c in custom_cols if row[c] != row2[c]]
-                changed_vals = {c: f"{row2[c]} → {row[c]}" for c in changed_cols}  # reversed direction
-
-                results.append({
-                    grca_col: grca,
-                    amount_col: (amt, row2[amount_col]),
-                    desc_col: f"{row[desc_col]} ↔ {row2[desc_col]}",
-                    "changed_custom": changed_cols if changed_cols else None,
-                    "changed_custom_values": changed_vals if changed_vals else None
-                })
-
-    return pd.DataFrame(results)
+    # Combine all results
+    matched = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+    return matched
