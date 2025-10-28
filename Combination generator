@@ -1,61 +1,82 @@
 import pandas as pd
 import numpy as np
-from itertools import combinations
 
-def find_offsetting_groups_with_changes(df, grca_col='grca_account', amount_col='adj_amount',
-                                        custom_cols=None, tol=1e-6):
+def find_offsetting_groups_fast(df, grca_col='grca_account', amount_col='adj_amount',
+                                custom_cols=None, tol=1e-6):
     """
-    Identify offsetting adjustment groups within each GRCA account.
-    Handles 1-to-1 and multi-split matches, and extracts changed custom columns & values.
-    Returns one row per adjustment entry.
+    Hybrid Greedy + Hash-based matching for offsetting adjustments.
+    Matches +ve and -ve adjustments within each GRCA account and identifies changed customs.
+    
+    Returns: DataFrame with columns
+        [grca_account, adj_amount, changed_customs, changed_custom_values]
     """
     if custom_cols is None:
         custom_cols = [c for c in df.columns if c.startswith('custom_')]
 
-    results = []
     df = df.copy()
+    df['_abs_amt'] = df[amount_col].abs().round(6)
+    results = []
 
     for acc, grp in df.groupby(grca_col):
         grp = grp.reset_index(drop=True)
-        pos = grp[grp[amount_col] > 0]
-        neg = grp[grp[amount_col] < 0]
-        used = set()
+        grp['_used'] = False
+        
+        # --- (1) Hash-based quick matching for exact abs(amount) groups ---
+        abs_groups = grp.groupby('_abs_amt')
+        for _, g in abs_groups:
+            if abs(g[amount_col].sum()) < tol and len(g) > 1:
+                grp.loc[g.index, '_used'] = True
+                diffs = []
+                for c in custom_cols:
+                    vals = g[c].dropna().unique()
+                    if len(vals) > 1:
+                        diffs.append((c, " → ".join(map(str, vals))))
+                changed_cols = [d[0] for d in diffs]
+                changed_vals = [d[1] for d in diffs]
+                for _, r in g.iterrows():
+                    results.append({
+                        grca_col: acc,
+                        amount_col: r[amount_col],
+                        'changed_customs': ', '.join(changed_cols) if changed_cols else None,
+                        'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
+                    })
+        
+        # --- (2) Greedy matching for remaining unmatched entries ---
+        rem = grp[~grp['_used']].sort_values(amount_col).reset_index()
+        if rem.empty:
+            continue
 
-        for ni, nrow in neg.iterrows():
-            if ni in used:
-                continue
+        pos = rem[rem[amount_col] > 0].to_dict('records')
+        neg = rem[rem[amount_col] < 0].to_dict('records')
 
-            for r in range(1, len(pos) + 1):
-                found = False
-                for combo in combinations(pos.index, r):
-                    if any(i in used for i in combo):
-                        continue
-                    s = pos.loc[list(combo), amount_col].sum()
-                    if abs(s + nrow[amount_col]) < tol:
-                        group_rows = grp.loc[[ni, *combo]]
-                        used.update([ni, *combo])
-
-                        # find changed custom cols and values
-                        diffs = []
-                        for c in custom_cols:
-                            vals = group_rows[c].dropna().unique()
-                            if len(vals) > 1:
-                                changed_vals = " → ".join(map(str, vals))
-                                diffs.append((c, changed_vals))
-
-                        changed_cols = [d[0] for d in diffs]
-                        changed_vals = [d[1] for d in diffs]
-
-                        for _, row in group_rows.iterrows():
-                            results.append({
-                                grca_col: acc,
-                                amount_col: row[amount_col],
-                                'changed_customs': ', '.join(changed_cols) if changed_cols else None,
-                                'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
-                            })
-                        found = True
-                        break
-                if found:
-                    break
+        i, j = 0, 0
+        while i < len(pos) and j < len(neg):
+            diff = pos[i][amount_col] + neg[j][amount_col]
+            if abs(diff) <= tol:
+                g = pd.DataFrame([pos[i], neg[j]])
+                diffs = []
+                for c in custom_cols:
+                    vals = g[c].dropna().unique()
+                    if len(vals) > 1:
+                        diffs.append((c, " → ".join(map(str, vals))))
+                changed_cols = [d[0] for d in diffs]
+                changed_vals = [d[1] for d in diffs]
+                for _, r in g.iterrows():
+                    results.append({
+                        grca_col: acc,
+                        amount_col: r[amount_col],
+                        'changed_customs': ', '.join(changed_cols) if changed_cols else None,
+                        'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
+                    })
+                i += 1
+                j += 1
+            elif diff > 0:
+                # Positive side too large → reduce it
+                pos[i][amount_col] = diff
+                j += 1
+            else:
+                # Negative side too large → reduce it
+                neg[j][amount_col] = diff
+                i += 1
 
     return pd.DataFrame(results)
