@@ -1,0 +1,61 @@
+import pandas as pd
+import numpy as np
+from itertools import combinations
+
+def find_offsetting_groups_with_changes(df, grca_col='grca_account', amount_col='adj_amount',
+                                        custom_cols=None, tol=1e-6):
+    """
+    Identify offsetting adjustment groups within each GRCA account.
+    Handles 1-to-1 and multi-split matches, and extracts changed custom columns & values.
+    Returns one row per adjustment entry.
+    """
+    if custom_cols is None:
+        custom_cols = [c for c in df.columns if c.startswith('custom_')]
+
+    results = []
+    df = df.copy()
+
+    for acc, grp in df.groupby(grca_col):
+        grp = grp.reset_index(drop=True)
+        pos = grp[grp[amount_col] > 0]
+        neg = grp[grp[amount_col] < 0]
+        used = set()
+
+        for ni, nrow in neg.iterrows():
+            if ni in used:
+                continue
+
+            for r in range(1, len(pos) + 1):
+                found = False
+                for combo in combinations(pos.index, r):
+                    if any(i in used for i in combo):
+                        continue
+                    s = pos.loc[list(combo), amount_col].sum()
+                    if abs(s + nrow[amount_col]) < tol:
+                        group_rows = grp.loc[[ni, *combo]]
+                        used.update([ni, *combo])
+
+                        # find changed custom cols and values
+                        diffs = []
+                        for c in custom_cols:
+                            vals = group_rows[c].dropna().unique()
+                            if len(vals) > 1:
+                                changed_vals = " → ".join(map(str, vals))
+                                diffs.append((c, changed_vals))
+
+                        changed_cols = [d[0] for d in diffs]
+                        changed_vals = [d[1] for d in diffs]
+
+                        for _, row in group_rows.iterrows():
+                            results.append({
+                                grca_col: acc,
+                                amount_col: row[amount_col],
+                                'changed_customs': ', '.join(changed_cols) if changed_cols else None,
+                                'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
+                            })
+                        found = True
+                        break
+                if found:
+                    break
+
+    return pd.DataFrame(results)
