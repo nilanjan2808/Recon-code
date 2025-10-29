@@ -18,11 +18,8 @@ def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_
     for (acc, desc), grp in df.groupby([grca_col, desc_col]):
         grp = grp.reset_index(drop=True)
 
-        pos = grp[grp[amount_col] > 0].copy()
-        neg = grp[grp[amount_col] < 0].copy()
-
-        pos['_remain'] = pos[amount_col].values
-        neg['_remain'] = neg[amount_col].values
+        pos = grp[grp[amount_col] > 0].copy().reset_index(drop=True)
+        neg = grp[grp[amount_col] < 0].copy().reset_index(drop=True)
 
         # --- Exact +ve/-ve absolute match (fast path)
         abs_groups = grp.groupby(grp[amount_col].abs().round(6))
@@ -48,22 +45,20 @@ def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_
         if rem.empty:
             continue
 
-        # --- Greedy split matching for remaining ---
-        pos = rem[rem[amount_col] > 0].copy()
-        neg = rem[rem[amount_col] < 0].copy()
+        pos = rem[rem[amount_col] > 0].copy().reset_index(drop=True)
+        neg = rem[rem[amount_col] < 0].copy().reset_index(drop=True)
 
+        # --- Greedy split matching for remaining ---
         for i in range(len(pos)):
             for j in range(len(neg)):
-                if abs(pos.loc[i, amount_col]) <= tol or abs(neg.loc[j, amount_col]) <= tol:
+                if abs(pos.iloc[i][amount_col]) <= tol or abs(neg.iloc[j][amount_col]) <= tol:
                     continue
 
-                # Amount that can be offset
-                match_amt = min(pos.loc[i, amount_col], -neg.loc[j, amount_col])
+                match_amt = min(pos.iloc[i][amount_col], -neg.iloc[j][amount_col])
                 if match_amt <= tol:
                     continue
 
-                # Record the pairing (partial if split)
-                temp = pd.DataFrame([pos.loc[i], neg.loc[j]])
+                temp = pd.DataFrame([pos.iloc[i], neg.iloc[j]])
                 diffs = []
                 for c in custom_cols:
                     vals = temp[c].dropna().unique()
@@ -78,8 +73,23 @@ def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_
                         'changed_custom_values': ', '.join(str(r[c]) for c in diffs) if diffs else None
                     })
 
-                # Reduce remaining amounts (simulate partial match)
-                pos.loc[i, amount_col] -= match_amt
-                neg.loc[j, amount_col] += match_amt  # since it's negative
+                # Reduce remaining amounts using iloc safely
+                pos.at[i, amount_col] -= match_amt
+                neg.at[j, amount_col] += match_amt  # since it's negative
 
         # --- Unmatched residuals ---
+        unmatched = pd.concat([
+            pos[abs(pos[amount_col]) > tol],
+            neg[abs(neg[amount_col]) > tol]
+        ], ignore_index=True)
+
+        for _, r in unmatched.iterrows():
+            results.append({
+                grca_col: acc,
+                desc_col: desc,
+                amount_col: r[amount_col],
+                'changed_customs': None,
+                'changed_custom_values': None
+            })
+
+    return pd.DataFrame(results)
