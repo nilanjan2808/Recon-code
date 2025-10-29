@@ -1,88 +1,79 @@
 import pandas as pd
 import numpy as np
 
-def find_offsetting_groups_hybrid(df, grca_col='grca_account', desc_col='adj_description',
-                                  amount_col='adj_amount', custom_cols=None, tol=1e-6):
+def find_offsetting_groups_fast_v2(df, grca_col='grca_account', desc_col='adj_description',
+                                   amount_col='adj_amount', custom_cols=None, tol=1e-6):
     """
-    Hybrid Greedy + Split-based matching for offsetting adjustments.
-    Each (grca_account, adj_description) group is processed independently.
-    Matches +ve/-ve pairs, then partial splits.
-    Returns each original row (no merging).
+    Hybrid Greedy + Hash-based matching for offsetting adjustments.
+    Matches +ve and -ve adjustments within each (GRCA account, adj_description)
+    and identifies changed customs.
+    
+    Returns DataFrame with columns:
+      [grca_account, adj_description, adj_amount, changed_customs, changed_custom_values]
     """
     if custom_cols is None:
         custom_cols = [c for c in df.columns if c.startswith('custom_')]
 
     df = df.copy()
     df['_abs_amt'] = df[amount_col].abs().round(6)
-    df['_used'] = False
     results = []
 
-    # --- group by both GRCA and Adj Description ---
     for (acc, desc), grp in df.groupby([grca_col, desc_col]):
         grp = grp.reset_index(drop=True)
+        grp['_used'] = False
         
-        # (1) Pair Matching - exact offset
-        pairs = []
-        used_idx = set()
-        pos_idx = grp.index[grp[amount_col] > 0].tolist()
-        neg_idx = grp.index[grp[amount_col] < 0].tolist()
+        # --- (1) Hash-based quick matching for exact abs(amount) groups ---
+        abs_groups = grp.groupby('_abs_amt')
+        for _, g in abs_groups:
+            if abs(g[amount_col].sum()) < tol and len(g) > 1:
+                grp.loc[g.index, '_used'] = True
+                diffs = []
+                for c in custom_cols:
+                    vals = g[c].dropna().unique()
+                    if len(vals) > 1:
+                        diffs.append(c)
+                for _, r in g.iterrows():
+                    results.append({
+                        grca_col: acc,
+                        desc_col: desc,
+                        amount_col: r[amount_col],
+                        'changed_customs': ', '.join(diffs) if diffs else None,
+                        'changed_custom_values': ', '.join(str(r[c]) for c in diffs) if diffs else None
+                    })
+        
+        # --- (2) Greedy matching for remaining unmatched entries ---
+        rem = grp[~grp['_used']].sort_values(amount_col).reset_index()
+        if rem.empty:
+            continue
 
-        for i in pos_idx:
-            for j in neg_idx:
-                if i not in used_idx and j not in used_idx:
-                    if abs(grp.loc[i, amount_col] + grp.loc[j, amount_col]) <= tol:
-                        pairs.append([i, j])
-                        used_idx.update([i, j])
-                        break
-        
-        # (2) Partial (split) Matching - leftover positive/negative rows
-        leftover = grp.loc[~grp.index.isin(used_idx)].sort_values(amount_col)
-        split_groups = []
-        pos = leftover[leftover[amount_col] > 0].to_dict('records')
-        neg = leftover[leftover[amount_col] < 0].to_dict('records')
+        pos = rem[rem[amount_col] > 0].to_dict('records')
+        neg = rem[rem[amount_col] < 0].to_dict('records')
+
         i, j = 0, 0
         while i < len(pos) and j < len(neg):
             diff = pos[i][amount_col] + neg[j][amount_col]
             if abs(diff) <= tol:
-                split_groups.append([pos[i]['_abs_amt'], pos[i], neg[j]])
+                g = pd.DataFrame([pos[i], neg[j]])
+                diffs = []
+                for c in custom_cols:
+                    vals = g[c].dropna().unique()
+                    if len(vals) > 1:
+                        diffs.append(c)
+                for _, r in g.iterrows():
+                    results.append({
+                        grca_col: acc,
+                        desc_col: desc,
+                        amount_col: r[amount_col],
+                        'changed_customs': ', '.join(diffs) if diffs else None,
+                        'changed_custom_values': ', '.join(str(r[c]) for c in diffs) if diffs else None
+                    })
                 i += 1
                 j += 1
             elif diff > 0:
-                # Positive side too large → partial offset
                 pos[i][amount_col] = diff
                 j += 1
             else:
                 neg[j][amount_col] = diff
                 i += 1
-
-        # --- Collect results: keep all rows ---
-        for idx, row in grp.iterrows():
-            # determine matched group (pair or split)
-            match_group = None
-            for p in pairs:
-                if idx in p:
-                    match_group = grp.loc[p]
-                    break
-            if match_group is None:
-                # check split groups
-                for s in split_groups:
-                    if any(row.equals(pd.Series(x)) for x in s[1:]):
-                        match_group = pd.DataFrame([s[1], s[2]])
-                        break
-
-            changed_cols, changed_vals = [], []
-            if match_group is not None:
-                for c in custom_cols:
-                    vals = match_group[c].dropna().unique()
-                    if len(vals) > 1:
-                        changed_cols.append(c)
-                        changed_vals.append(str(row[c]))
-            results.append({
-                grca_col: acc,
-                desc_col: desc,
-                amount_col: row[amount_col],
-                'changed_customs': ', '.join(changed_cols) if changed_cols else None,
-                'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
-            })
 
     return pd.DataFrame(results)
