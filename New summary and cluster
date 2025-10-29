@@ -121,3 +121,39 @@ def cluster_adjustments(df, amount_col='adj_amount',
 
     return df_neg, cluster_summary, best_silhouette
 
+import pandas as pd
+
+def summarize_clusters(df, cluster_col='cluster',
+                       desc_col='adj_description',
+                       custom_col='changed_customs',
+                       custom_val_col='changed_custom_values'):
+    """
+    Summarize clustered adjustment data.
+    
+    Groups by cluster and aggregates unique values of description,
+    changed_customs, and changed_custom_values into comma-separated strings.
+    """
+    if cluster_col not in df.columns:
+        raise ValueError(f"Column '{cluster_col}' not found in DataFrame.")
+
+    summary = (
+        df.groupby(cluster_col)
+          .agg({
+              desc_col: lambda x: ', '.join(sorted(set([str(i) for i in x if pd.notna(i)]))),
+              custom_col: lambda x: ', '.join(sorted(set([str(i) for i in x if pd.notna(i)]))),
+              custom_val_col: lambda x: ', '.join(sorted(set([str(i) for i in x if pd.notna(i)]))),
+              'adj_amount': ['count', 'mean', 'sum']
+          })
+          .reset_index()
+    )
+
+    # Flatten column names
+    summary.columns = ['cluster', 'adj_descriptions', 'changed_customs',
+                       'changed_custom_values', 'count', 'mean_adj', 'sum_adj']
+
+    # Sort clusters by total magnitude of adjustment
+    summary = summary.sort_values(by='sum_adj', ascending=True).reset_index(drop=True)
+
+    return summary
+
+
