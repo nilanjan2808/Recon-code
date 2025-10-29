@@ -1,109 +1,88 @@
 import pandas as pd
 import numpy as np
 
-def find_offsetting_pairs_and_splits_final(df, grca_col='grca_account', desc_col='adj_description',
-                                           amount_col='adj_amount', custom_cols=None, tol=1e-6):
+def find_offsetting_groups_hybrid(df, grca_col='grca_account', desc_col='adj_description',
+                                  amount_col='adj_amount', custom_cols=None, tol=1e-6):
     """
-    Final version:
-    - Matches within each (grca_account, adj_description)
-    - Uses pair-first, then split logic
-    - No duplicate or mirrored rows
-    - Keeps unmatched rows with blank custom info
+    Hybrid Greedy + Split-based matching for offsetting adjustments.
+    Each (grca_account, adj_description) group is processed independently.
+    Matches +ve/-ve pairs, then partial splits.
+    Returns each original row (no merging).
     """
     if custom_cols is None:
         custom_cols = [c for c in df.columns if c.startswith('custom_')]
 
     df = df.copy()
+    df['_abs_amt'] = df[amount_col].abs().round(6)
+    df['_used'] = False
     results = []
 
+    # --- group by both GRCA and Adj Description ---
     for (acc, desc), grp in df.groupby([grca_col, desc_col]):
         grp = grp.reset_index(drop=True)
+        
+        # (1) Pair Matching - exact offset
+        pairs = []
+        used_idx = set()
+        pos_idx = grp.index[grp[amount_col] > 0].tolist()
+        neg_idx = grp.index[grp[amount_col] < 0].tolist()
 
-        pos = grp[grp[amount_col] > 0].copy().reset_index(drop=True)
-        neg = grp[grp[amount_col] < 0].copy().reset_index(drop=True)
-        matched_idx = set()
+        for i in pos_idx:
+            for j in neg_idx:
+                if i not in used_idx and j not in used_idx:
+                    if abs(grp.loc[i, amount_col] + grp.loc[j, amount_col]) <= tol:
+                        pairs.append([i, j])
+                        used_idx.update([i, j])
+                        break
+        
+        # (2) Partial (split) Matching - leftover positive/negative rows
+        leftover = grp.loc[~grp.index.isin(used_idx)].sort_values(amount_col)
+        split_groups = []
+        pos = leftover[leftover[amount_col] > 0].to_dict('records')
+        neg = leftover[leftover[amount_col] < 0].to_dict('records')
+        i, j = 0, 0
+        while i < len(pos) and j < len(neg):
+            diff = pos[i][amount_col] + neg[j][amount_col]
+            if abs(diff) <= tol:
+                split_groups.append([pos[i]['_abs_amt'], pos[i], neg[j]])
+                i += 1
+                j += 1
+            elif diff > 0:
+                # Positive side too large → partial offset
+                pos[i][amount_col] = diff
+                j += 1
+            else:
+                neg[j][amount_col] = diff
+                i += 1
 
-        # --- (1) Exact pair match ---
-        paired = False
-        for i in range(len(pos)):
-            for j in range(len(neg)):
-                if j in matched_idx:
-                    continue
-                if abs(pos.loc[i, amount_col] + neg.loc[j, amount_col]) <= tol:
-                    paired = True
-                    matched_idx.add(j)
-
-                    # Detect changed customs
-                    diffs = [c for c in custom_cols if pos.loc[i, c] != neg.loc[j, c]]
-
-                    # Add both rows once each
-                    for row in [pos.loc[i], neg.loc[j]]:
-                        results.append({
-                            grca_col: acc,
-                            desc_col: desc,
-                            amount_col: row[amount_col],
-                            'changed_customs': ', '.join(diffs) if diffs else None,
-                            'changed_custom_values': ', '.join(str(row[c]) for c in diffs) if diffs else None
-                        })
-                    break  # move to next positive
-
-        if paired:
-            continue  # ✅ skip split logic if pairs already found
-
-        # --- (2) Split matching logic (only if no pairs found) ---
-        used_neg = set()
-        for i in range(len(pos)):
-            target = pos.loc[i, amount_col]
-            current_sum = 0
-            matched_neg_idx = []
-            for j in range(len(neg)):
-                if j in used_neg:
-                    continue
-                if abs(current_sum + neg.loc[j, amount_col]) <= abs(target) + tol:
-                    current_sum += neg.loc[j, amount_col]
-                    matched_neg_idx.append(j)
-                if abs(current_sum + target) <= tol:
+        # --- Collect results: keep all rows ---
+        for idx, row in grp.iterrows():
+            # determine matched group (pair or split)
+            match_group = None
+            for p in pairs:
+                if idx in p:
+                    match_group = grp.loc[p]
                     break
+            if match_group is None:
+                # check split groups
+                for s in split_groups:
+                    if any(row.equals(pd.Series(x)) for x in s[1:]):
+                        match_group = pd.DataFrame([s[1], s[2]])
+                        break
 
-            if abs(current_sum + target) <= tol and matched_neg_idx:
-                used_neg.update(matched_neg_idx)
-                diffs = []
+            changed_cols, changed_vals = [], []
+            if match_group is not None:
                 for c in custom_cols:
-                    vals = [pos.loc[i, c]] + list(neg.loc[matched_neg_idx, c].dropna().unique())
-                    if len(set(vals)) > 1:
-                        diffs.append(c)
-
-                # Add positive row
-                results.append({
-                    grca_col: acc,
-                    desc_col: desc,
-                    amount_col: pos.loc[i, amount_col],
-                    'changed_customs': ', '.join(diffs) if diffs else None,
-                    'changed_custom_values': ', '.join(str(pos.loc[i, c]) for c in diffs) if diffs else None
-                })
-
-                # Add split negative rows
-                for j in matched_neg_idx:
-                    row = neg.loc[j]
-                    results.append({
-                        grca_col: acc,
-                        desc_col: desc,
-                        amount_col: row[amount_col],
-                        'changed_customs': ', '.join(diffs) if diffs else None,
-                        'changed_custom_values': ', '.join(str(row[c]) for c in diffs) if diffs else None
-                    })
-
-        # --- (3) Add remaining unmatched rows ---
-        unmatched = grp[
-            ~grp.index.isin(pos.index.union(neg.index))
-        ]
-        for _, r in unmatched.iterrows():
+                    vals = match_group[c].dropna().unique()
+                    if len(vals) > 1:
+                        changed_cols.append(c)
+                        changed_vals.append(str(row[c]))
             results.append({
                 grca_col: acc,
                 desc_col: desc,
-                amount_col: r[amount_col],
-                'changed_customs': None,
-                'changed_custom_values': None
+                amount_col: row[amount_col],
+                'changed_customs': ', '.join(changed_cols) if changed_cols else None,
+                'changed_custom_values': ', '.join(changed_vals) if changed_vals else None
             })
 
     return pd.DataFrame(results)
