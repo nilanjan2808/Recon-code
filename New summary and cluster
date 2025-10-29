@@ -184,4 +184,117 @@ def save_dfs_to_excel(dfs, sheet_names=None, file_name='output.xlsx'):
     print(f"✅ Excel file '{file_name}' created with {len(dfs)} sheets.")
 
 
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics import silhouette_score
+from scipy.sparse import hstack
+import matplotlib.pyplot as plt
+
+def hybrid_clustering(df, amount_col='adj_amount',
+                      desc_col='adj_description',
+                      custom_col='changed_customs',
+                      custom_val_col='changed_custom_values',
+                      max_k=10, eps=0.5, min_samples=3):
+    """
+    Performs three clustering methods:
+      1. KMeans on numerical + one-hot features
+      2. KMeans on TF-IDF text embeddings
+      3. DBSCAN clustering
+
+    Returns: DataFrame with cluster assignments and prints elbow & silhouette analysis.
+    """
+
+    df = df.copy()
+    df = df.dropna(subset=[desc_col])  # remove blank descriptions
+
+    # ---------- Step 1: One-hot encode categorical columns ----------
+    cat_features = df[[desc_col, custom_col, custom_val_col]].astype(str).fillna('None')
+    ohe = OneHotEncoder(sparse=True, handle_unknown='ignore')
+    X_cat = ohe.fit_transform(cat_features)
+
+    # Numeric scaling for adj_amount
+    X_num = StandardScaler().fit_transform(df[[amount_col]])
+
+    # Combine numeric + categorical
+    X_combined = hstack([X_num, X_cat])
+
+    # ---------- Step 2: TF-IDF features ----------
+    tfidf = TfidfVectorizer(stop_words='english', max_features=1000)
+    tfidf_matrix = tfidf.fit_transform(
+        df[desc_col].astype(str) + " " + df[custom_col].astype(str) + " " + df[custom_val_col].astype(str)
+    )
+
+    # ---------- Step 3: Elbow method for KMeans ----------
+    inertia = []
+    K = range(2, max_k + 1)
+    for k in K:
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        km.fit(X_combined)
+        inertia.append(km.inertia_)
+
+    plt.figure(figsize=(5, 3))
+    plt.plot(K, inertia, 'bx-')
+    plt.title('Elbow Method (KMeans on OHE)')
+    plt.xlabel('k')
+    plt.ylabel('Inertia')
+    plt.show()
+
+    # Optimal cluster selection
+    optimal_k = np.diff(inertia, 2).argmin() + 2
+
+    # ---------- Step 4: Silhouette score (numerical + OHE) ----------
+    km_combined = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
+    labels_combined = km_combined.fit_predict(X_combined)
+    sil_combined = silhouette_score(X_combined, labels_combined)
+
+    print(f"✅ KMeans (OHE) Optimal Clusters = {optimal_k} | Silhouette = {sil_combined:.3f}")
+
+    # ---------- Step 5: TF-IDF KMeans ----------
+    inertia_tfidf = []
+    for k in K:
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        km.fit(tfidf_matrix)
+        inertia_tfidf.append(km.inertia_)
+
+    plt.figure(figsize=(5, 3))
+    plt.plot(K, inertia_tfidf, 'gx-')
+    plt.title('Elbow Method (KMeans on TF-IDF)')
+    plt.xlabel('k')
+    plt.ylabel('Inertia')
+    plt.show()
+
+    optimal_k_tfidf = np.diff(inertia_tfidf, 2).argmin() + 2
+    km_tfidf = KMeans(n_clusters=optimal_k_tfidf, random_state=42, n_init=10)
+    labels_tfidf = km_tfidf.fit_predict(tfidf_matrix)
+    sil_tfidf = silhouette_score(tfidf_matrix, labels_tfidf)
+
+    print(f"✅ KMeans (TF-IDF) Optimal Clusters = {optimal_k_tfidf} | Silhouette = {sil_tfidf:.3f}")
+
+    # ---------- Step 6: DBSCAN ----------
+    dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+    labels_dbscan = dbscan.fit_predict(X_combined)
+    n_clusters_dbscan = len(set(labels_dbscan)) - (1 if -1 in labels_dbscan else 0)
+    if n_clusters_dbscan > 1:
+        sil_dbscan = silhouette_score(X_combined, labels_dbscan)
+    else:
+        sil_dbscan = np.nan
+
+    print(f"✅ DBSCAN Clusters = {n_clusters_dbscan} | Silhouette = {sil_dbscan}")
+
+    # ---------- Step 7: Merge results ----------
+    df['kmeans_cluster'] = labels_combined
+    df['tfidf_cluster'] = labels_tfidf
+    df['dbscan_cluster'] = labels_dbscan
+
+    return df, {
+        'kmeans_clusters': optimal_k,
+        'tfidf_clusters': optimal_k_tfidf,
+        'dbscan_clusters': n_clusters_dbscan,
+        'silhouette_kmeans': sil_combined,
+        'silhouette_tfidf': sil_tfidf,
+        'silhouette_dbscan': sil_dbscan
+    }
 
