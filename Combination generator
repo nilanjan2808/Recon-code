@@ -1,12 +1,14 @@
 import pandas as pd
 import numpy as np
 
-def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_description',
-                                     amount_col='adj_amount', custom_cols=None, tol=1e-6):
+def find_offsetting_pairs_and_splits_clean(df, grca_col='grca_account', desc_col='adj_description',
+                                           amount_col='adj_amount', custom_cols=None, tol=1e-6):
     """
-    Find +ve/-ve offsetting pairs or split matches within each (grca_account, adj_description).
-    Each matched portion (even from splits) appears as a separate row.
-    Shows current row’s custom values, not arrows.
+    Hybrid Hash + Greedy offsetting logic.
+    ✅ Tries 1-to-1 pairs first
+    ✅ If no pairs found, then tries split combinations
+    ✅ Keeps matched rows separate (not merged)
+    ✅ Keeps unmatched rows as-is
     """
     if custom_cols is None:
         custom_cols = [c for c in df.columns if c.startswith('custom_')]
@@ -14,18 +16,17 @@ def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_
     df = df.copy()
     results = []
 
-    # Group by both GRCA account and adj description
+    # Group by GRCA + description
     for (acc, desc), grp in df.groupby([grca_col, desc_col]):
         grp = grp.reset_index(drop=True)
 
-        pos = grp[grp[amount_col] > 0].copy().reset_index(drop=True)
-        neg = grp[grp[amount_col] < 0].copy().reset_index(drop=True)
-
-        # --- Exact +ve/-ve absolute match (fast path)
+        # --- 1️⃣ Try exact pairs first ---
+        matched_idx = set()
         abs_groups = grp.groupby(grp[amount_col].abs().round(6))
-        used_idx = set()
+
         for _, g in abs_groups:
-            if len(g) > 1 and abs(g[amount_col].sum()) <= tol:
+            if len(g) == 2 and abs(g[amount_col].sum()) <= tol:
+                # Found clean pair
                 diffs = []
                 for c in custom_cols:
                     vals = g[c].dropna().unique()
@@ -39,16 +40,19 @@ def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_
                         'changed_customs': ', '.join(diffs) if diffs else None,
                         'changed_custom_values': ', '.join(str(r[c]) for c in diffs) if diffs else None
                     })
-                used_idx.update(g.index)
+                matched_idx.update(g.index)
 
-        rem = grp.loc[~grp.index.isin(used_idx)]
+        # Remaining unmatched rows
+        rem = grp.loc[~grp.index.isin(matched_idx)]
         if rem.empty:
             continue
 
+        # --- 2️⃣ If no pairs matched, try split matches ---
         pos = rem[rem[amount_col] > 0].copy().reset_index(drop=True)
         neg = rem[rem[amount_col] < 0].copy().reset_index(drop=True)
 
-        # --- Greedy split matching for remaining ---
+        matched_any_split = False
+
         for i in range(len(pos)):
             for j in range(len(neg)):
                 if abs(pos.iloc[i][amount_col]) <= tol or abs(neg.iloc[j][amount_col]) <= tol:
@@ -58,6 +62,8 @@ def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_
                 if match_amt <= tol:
                     continue
 
+                # Mark as split match
+                matched_any_split = True
                 temp = pd.DataFrame([pos.iloc[i], neg.iloc[j]])
                 diffs = []
                 for c in custom_cols:
@@ -73,23 +79,18 @@ def find_offsetting_pairs_and_splits(df, grca_col='grca_account', desc_col='adj_
                         'changed_custom_values': ', '.join(str(r[c]) for c in diffs) if diffs else None
                     })
 
-                # Reduce remaining amounts using iloc safely
                 pos.at[i, amount_col] -= match_amt
-                neg.at[j, amount_col] += match_amt  # since it's negative
+                neg.at[j, amount_col] += match_amt
 
-        # --- Unmatched residuals ---
-        unmatched = pd.concat([
-            pos[abs(pos[amount_col]) > tol],
-            neg[abs(neg[amount_col]) > tol]
-        ], ignore_index=True)
-
-        for _, r in unmatched.iterrows():
-            results.append({
-                grca_col: acc,
-                desc_col: desc,
-                amount_col: r[amount_col],
-                'changed_customs': None,
-                'changed_custom_values': None
-            })
+        # --- 3️⃣ If neither pairs nor splits, keep unmatched ---
+        if not matched_any_split and not matched_idx:
+            for _, r in rem.iterrows():
+                results.append({
+                    grca_col: acc,
+                    desc_col: desc,
+                    amount_col: r[amount_col],
+                    'changed_customs': None,
+                    'changed_custom_values': None
+                })
 
     return pd.DataFrame(results)
