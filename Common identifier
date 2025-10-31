@@ -1,0 +1,13 @@
+# Get unique codes in both
+main_codes = set(df_main['Grca Account CDE'].dropna().unique())
+ref_codes = set(codes['Codes'].dropna().unique())
+
+# Common unique codes
+common_codes = main_codes & ref_codes
+n_common_unique = len(common_codes)
+
+# How many rows in df_main contain those common codes
+n_rows_with_common = df_main['Grca Account CDE'].isin(common_codes).sum()
+
+print(f"Unique common codes: {n_common_unique}")
+print(f"Rows in df_main with those codes: {n_rows_with_common}")
