@@ -1,39 +1,66 @@
 import pandas as pd
 
-def summarize_adjustments(df, amount_col='adj_amount', desc_col='adj_description'):
-    # Filter negative adjustments
-    df_neg = df[df[amount_col] < 0].copy()
+import pandas as pd
+
+def summarize_adjustments(df, amount_col='adj_amount', desc_col='adj_description', ecl_col='ecl_flag'):
+    """
+    Summarize adjustments based on ECL flag logic:
+      - If ecl_flag == True → take positive amounts
+      - If ecl_flag == False → take negative amounts
+    Uses absolute values to reflect magnitude.
+    Shows absolute adjustment amounts in the output.
+    Adds '%' sign to percentage columns.
+    """
+    df = df.copy()
     
-    if df_neg.empty:
+    # Keep only valid descriptions
+    df = df[df[desc_col].notna() & (df[desc_col].astype(str).str.strip() != '')]
+    
+    # Filter based on ECL flag
+    df_filtered = df[
+        ((df[ecl_col] == True) & (df[amount_col] > 0)) |
+        ((df[ecl_col] == False) & (df[amount_col] < 0))
+    ].copy()
+    
+    if df_filtered.empty:
         return pd.DataFrame(columns=[
-            desc_col, 'sum_negative_amount', 'pct_negative_amount', 
-            'count_negative', 'pct_negative_count'
+            desc_col, 'abs_amount', 'adjusted_amount', 'pct_adjusted_amount',
+            'adjusted_count', 'pct_adjusted_count'
         ])
     
-    # Compute total stats
-    total_neg_amt = df_neg[amount_col].sum()
-    total_count = len(df_neg)
+    # Use absolute values for magnitude-based sums
+    df_filtered['_abs_amt'] = df_filtered[amount_col].abs()
+    
+    # Totals
+    total_amt = df_filtered['_abs_amt'].sum()
+    total_count = len(df_filtered)
     
     # Group by adjustment description
     summary = (
-        df_neg.groupby(desc_col)
-        .agg(sum_negative_amount=(amount_col, 'sum'),
-             count_negative=(amount_col, 'count'))
+        df_filtered.groupby(desc_col)
+        .agg(
+            abs_amount=('_abs_amt', 'sum'),
+            adjusted_amount=('_abs_amt', 'sum'),  # same as abs_amount (for clarity)
+            adjusted_count=(amount_col, 'count')
+        )
         .reset_index()
     )
     
     # Compute percentages
-    summary['pct_negative_amount'] = (
-        summary['sum_negative_amount'] / total_neg_amt * 100
-    ).round(2)
-    summary['pct_negative_count'] = (
-        summary['count_negative'] / total_count * 100
-    ).round(2)
+    summary['pct_adjusted_amount'] = (
+        (summary['adjusted_amount'] / total_amt * 100)
+        .round(2).astype(str) + '%'
+    )
+    summary['pct_adjusted_count'] = (
+        (summary['adjusted_count'] / total_count * 100)
+        .round(2).astype(str) + '%'
+    )
     
-    # Sort by sum of negatives (descending)
-    summary = summary.sort_values('sum_negative_amount', ascending=True)
+    # Sort by magnitude descending
+    summary = summary.sort_values('abs_amount', ascending=False)
     
     return summary
+
 
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.cluster import KMeans
