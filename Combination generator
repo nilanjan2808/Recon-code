@@ -2,7 +2,8 @@ import pandas as pd
 import numpy as np
 
 def find_offsetting_groups_final_v3(df, grca_col='grca_account', desc_col='adj_description',
-                                    amount_col='adj_amount', custom_cols=None, tol=1e-6):
+                                    amount_col='adj_amount', custom_cols=None,
+                                    ecl_col='ecl_flag', tol=1e-6):
     """
     Hybrid Hash + Greedy offsetting match finder.
     - Groups by (grca_account, adj_description)
@@ -10,11 +11,11 @@ def find_offsetting_groups_final_v3(df, grca_col='grca_account', desc_col='adj_d
     - Keeps each original row once
     - Determines changed customs by comparing positive vs negative subsets
     - Discards rows where adj_description is blank or null
+    - Preserves ecl_flag column in output
     """
     if custom_cols is None:
         custom_cols = [c for c in df.columns if c.startswith('custom_')]
 
-    # Drop rows with blank or null adj_description
     df = df.copy()
     df = df[df[desc_col].notna() & (df[desc_col].astype(str).str.strip() != '')]
     df['_abs_amt'] = df[amount_col].abs().round(6)
@@ -37,6 +38,7 @@ def find_offsetting_groups_final_v3(df, grca_col='grca_account', desc_col='adj_d
                         grca_col: acc,
                         desc_col: desc,
                         amount_col: r[amount_col],
+                        ecl_col: r[ecl_col],
                         'changed_customs': ', '.join(diffs) if diffs else None,
                         'changed_custom_values': ', '.join(
                             str(r[c]) for c in diffs if pd.notna(r[c])
@@ -54,7 +56,6 @@ def find_offsetting_groups_final_v3(df, grca_col='grca_account', desc_col='adj_d
         if not pos.empty and not neg.empty:
             total_sum = round(pos[amount_col].sum() + neg[amount_col].sum(), 6)
             if abs(total_sum) <= tol:
-                # Compare customs between pos and neg
                 diffs = []
                 for c in custom_cols:
                     pos_vals = pos[c].dropna().unique()
@@ -62,34 +63,34 @@ def find_offsetting_groups_final_v3(df, grca_col='grca_account', desc_col='adj_d
                     if len(set(pos_vals) ^ set(neg_vals)) > 0:
                         diffs.append(c)
 
-                # Assign to each row (no merging)
                 for _, r in pd.concat([pos, neg]).iterrows():
                     results.append({
                         grca_col: acc,
                         desc_col: desc,
                         amount_col: r[amount_col],
+                        ecl_col: r[ecl_col],
                         'changed_customs': ', '.join(diffs) if diffs else None,
                         'changed_custom_values': ', '.join(
                             str(r[c]) for c in diffs if pd.notna(r[c])
                         ) if diffs else None
                     })
             else:
-                # unmatched remaining
                 for _, r in rem.iterrows():
                     results.append({
                         grca_col: acc,
                         desc_col: desc,
                         amount_col: r[amount_col],
+                        ecl_col: r[ecl_col],
                         'changed_customs': None,
                         'changed_custom_values': None
                     })
         else:
-            # unmatched remaining
             for _, r in rem.iterrows():
                 results.append({
                     grca_col: acc,
                     desc_col: desc,
                     amount_col: r[amount_col],
+                    ecl_col: r[ecl_col],
                     'changed_customs': None,
                     'changed_custom_values': None
                 })
