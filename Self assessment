@@ -1,0 +1,71 @@
+
+1. Overview
+This year marked a period of significant learning, delivery, and value creation across key pillars â€” stakeholder engagement, technical upskilling, and financial domain enrichment. My focus was to strengthen end-to-end ownership of analytical tools, ensure global stakeholder satisfaction, and build cross-functional expertise combining data science and financial reporting principles.
+
+2. Key Deliverables and Achievements
+
+A. Stakeholder Management and Project Delivery
+- VIU Tool Enhancement & Deployment
+  Incorporated extensive feedback from the Mexico team for the VIU automation tool. Conducted successful parallel runs, validated results against legacy processes, and led deployment for site-wide usage.
+  This initiative ensured seamless transition from manual Excel-based processing to an automated Python workflow, improving accuracy, transparency, and processing time.
+
+- AMFR Parallel Run (Q2â€™25)
+  Executed a full-scale parallel run for AMFR, aligning outputs to business expectations and resolving discrepancies through data traceability checks.
+  Ensured all validation metrics matched legacy results and successfully delivered output for Q2â€™25. This project strengthened coordination with Finance and Modelling teams and showcased ownership in transitioning analytical tools into steady-state usage.
+
+- HBCE Parallel Runs (Q2 & Q3) â€“ Deep Dive
+  Collaborated closely with HBCE stakeholders to perform multiple rounds of parallel runs, addressing evolving user requirements and ensuring system accuracy.
+  Key enhancements and solutions delivered:
+  - Historical Comparison Logic: Designed an adaptive algorithm to reconcile year-on-year financial comparisons even when historical data was non-uniform or incomplete.
+  - Manual Adjustments Framework: Built a dynamic adjustment layer that allows users to directly post or modify input adjustments within the tool without breaking core logic.
+  - Scenario Flexibility & Configurability: Enhanced configuration handling to support multiple businesses (CMB, WPB, and Total) and country-level setups.
+  - Provided end-to-end execution support for Q2 and Q3 parallel runs, including testing, validation, and documentation of exceptions.
+  These improvements made the HBCE tool robust, user-friendly, and ready for production migration, receiving positive feedback from users for its responsiveness and analytical accuracy.
+
+B. Technical Upskilling and Data Science Development
+In parallel with core project responsibilities, I prioritized continuous technical learning and practical application to expand my analytical capabilities.
+
+- Data Nexus Challenge Participation:
+  Competed in the Data Nexus Challenge, advancing through two rigorous stages that involved solving complex, real-world financial data problems.
+  Developed working solutions leveraging machine learning, statistical modeling, and exploratory data analysis. This experience deepened my understanding of how analytical techniques can be used to derive insights from transactional and financial datasets.
+
+- Practical Application in Role:
+  Applied these learnings directly in ongoing workstreams â€” from building reconciliation logic in Python to integrating configurable business rules and improving tool responsiveness.
+  Enhanced proficiency in:
+  - Python (pandas, NumPy, Dash) for data automation and visualization
+  - Data validation frameworks for financial controls
+  - Statistical and clustering techniques for pattern recognition in adjustment analysis
+
+- Outcome:
+  These initiatives significantly improved my ability to approach problems from a data science lens, enabling me to bring quantitative rigor and automation-first thinking into financial analysis processes.
+
+C. Financial SME Knowledge Development
+To strengthen my financial domain expertise and contextual understanding of regulatory frameworks:
+
+- IFRS 17 Certification:
+  Completed a six-month course on IFRS 17, covering principles of insurance contract measurement, risk adjustment, and financial reporting for insurance entities.
+  Gained a strong grasp of:
+  - Key measurement models (Building Block Approach, PAA, and VFA)
+  - Recognition and presentation of insurance liabilities
+  - Disclosure and actuarial implications under the new accounting standard
+
+- Practical Relevance:
+  This learning has enriched my ability to interpret financial data, particularly around cash flow projections, valuation adjustments, and earnings pattern analysis, and to contextualize analytical outputs within regulatory frameworks.
+  It also enables better collaboration with stakeholders across risk and finance who work on IFRS-driven or model-based financial analyses.
+
+3. Current Initiatives
+- Adjustments Data Analytics Project
+  Currently driving a data scienceâ€“based analysis of adjustments data to identify recurring hotspots by volume and frequency.
+  Using a combination of clustering, text pattern detection, and descriptive analytics to highlight high-risk or frequently adjusted attributes.
+  The outcome will guide prioritization of root cause investigations and enhance transparency in adjustment drivers.
+
+4. Overall Impact
+- Strengthened collaboration with global stakeholders through transparent communication and timely delivery.
+- Significantly enhanced automation tools, making them more scalable, flexible, and aligned to finance user expectations.
+- Combined technical and financial skill growth to bridge the gap between data engineering and financial control.
+- Consistently demonstrated problem-solving initiative and accountability across high-impact deliverables.
+
+5. Focus Areas for Next Year
+- Deepen integration between financial modeling and data science, especially in adjustment analysis and movement attribution.
+- Continue advancing automation frameworks to enhance accuracy, efficiency, and insight generation.
+- Take a mentorship role to share technical expertise across cross-functional teams and encourage adoption of data-driven practices.
