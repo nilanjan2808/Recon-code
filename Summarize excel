@@ -1,0 +1,39 @@
+import pandas as pd
+
+def summarize_excel_sheets(file_path):
+    # Read all sheets
+    xls = pd.read_excel(file_path, sheet_name=None)
+    
+    summary_data = []
+
+    for sheet_name, df in xls.items():
+        # Handle empty sheets gracefully
+        if df.empty:
+            col_check = []
+            row_check = []
+        else:
+            # Column headers
+            col_check = df.columns.tolist()
+            
+            # Unique combinations of first two columns
+            if df.shape[1] >= 2:
+                row_check = df.iloc[:, :2].drop_duplicates().astype(str).agg(' | '.join, axis=1).tolist()
+            else:
+                row_check = df.iloc[:, 0].drop_duplicates().astype(str).tolist()
+        
+        summary_data.append({
+            'Sheet': sheet_name,
+            'Col_check': col_check,
+            'Row_check': row_check,
+            'Null_check': 'All'
+        })
+    
+    # Final summary DataFrame
+    summary_df = pd.DataFrame(summary_data)
+    return summary_df
+
+
+# Example usage
+file_path = "your_file.xlsx"  # <-- replace with your file name
+summary_df = summarize_excel_sheets(file_path)
+print(summary_df)
