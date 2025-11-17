@@ -1,0 +1,73 @@
+def analyze_custom_value_changes(df,
+                                 grca_col='grca_account',
+                                 desc_col='adj_description',
+                                 amount_col='adj_amount'):
+    """
+    Drilldown analysis of changed custom values:
+    - Uses only positive amounts for volume calculation
+    - Groups by (grca_account, adj_description) and then by description
+    """
+
+    df = df.copy()
+
+    # --- Normalize changed_custom_values as sorted tuple ---
+    def normalize_list(x):
+        if pd.isna(x) or x is None or str(x).strip() == '':
+            return None
+        parts = [p.strip() for p in str(x).split(',') if p.strip()]
+        return tuple(sorted(parts)) if parts else None
+
+    df['custom_list'] = df['changed_custom_values'].apply(normalize_list)
+
+    # --- Step 1: Group by (GRCA, DESC) ---
+    group_level = df.groupby([grca_col, desc_col]).agg(
+        custom_lists=('custom_list', lambda x: list(x.dropna())),
+        # Volume = positive amounts only
+        total_amount=(amount_col, lambda x: x[x > 0].sum())
+    ).reset_index()
+
+    # Normalize multi-list groups
+    def normalize_group_list(lst):
+        if not lst:
+            return None
+        flat = sorted(set([item for sub in lst for item in (sub if isinstance(sub, tuple) else [sub])]))
+        return tuple(flat) if flat else None
+
+    group_level['group_custom_list'] = group_level['custom_lists'].apply(normalize_group_list)
+
+    # --- Step 2: Group by description ---
+    results = []
+
+    for desc, g in group_level.groupby(desc_col):
+
+        total_freq = len(g)
+        total_vol = g['total_amount'].sum()  # positive only already applied
+
+        freq_table = (
+            g.groupby('group_custom_list')
+             .agg(
+                 freq=('group_custom_list', 'count'),
+                 volume=('total_amount', 'sum')  # already positive-only
+             )
+             .reset_index()
+        )
+
+        # Percentages
+        freq_table['freq_pct'] = (freq_table['freq'] / total_freq * 100).round(2)
+        freq_table['vol_pct'] = (
+            freq_table['volume'] / total_vol * 100 if total_vol != 0 else 0
+        ).round(2)
+
+        freq_table[desc_col] = desc
+        results.append(freq_table)
+
+    final_df = pd.concat(results, ignore_index=True)
+
+    # Convert tuple list → comma strings
+    final_df['group_custom_list'] = final_df['group_custom_list'].apply(
+        lambda x: ', '.join(list(x)) if isinstance(x, tuple) else None
+    )
+
+    return final_df[
+        [desc_col, 'group_custom_list', 'freq', 'freq_pct', 'volume', 'vol_pct']
+    ]
