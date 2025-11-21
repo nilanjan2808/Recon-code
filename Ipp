@@ -1,22 +1,21 @@
 import pandas as pd
 import numpy as np
 import os
+import re
 
 def apply_adjustment(df, value, unit):
     """
     Apply adjustments to numeric cells in the DataFrame based on unit.
     """
 
-    # Percentage adjustment
     if unit == "%":
         factor = 1 + (value / 100)
         return df.applymap(
             lambda x: x * factor if np.issubdtype(type(x), np.number) else x
         )
 
-    # BPS adjustment
     elif unit == "bps":
-        adj = value / 100         # 100 bps → 1
+        adj = value / 100
         return df.applymap(
             lambda x: x + adj if np.issubdtype(type(x), np.number) else x
         )
@@ -26,38 +25,44 @@ def apply_adjustment(df, value, unit):
 
 
 def process_file(input_file, config_file, output_folder="outputs"):
-    # Read the entire workbook
+    # Remove extension for naming
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+
+    # Read entire workbook
     full_book = pd.read_excel(input_file, sheet_name=None)
 
     # Read config
     config = pd.read_excel(config_file)
 
-    # Output folder
+    # Make output dir
     os.makedirs(output_folder, exist_ok=True)
 
-    for i, row in config.iterrows():
-        sheet = row["Sheet"]
+    for _, row in config.iterrows():
+        sheet = str(row["Sheet"])
         value = row["Value"]
-        unit = row["Unit"]
+        unit = str(row["Unit"])
 
         if sheet not in full_book:
-            print(f"Sheet '{sheet}' not present. Skipping.")
+            print(f"Sheet '{sheet}' not found. Skipping.")
             continue
 
-        print(f"Generating file {i+1}: modifying '{sheet}' with +{value}{unit}")
+        print(f"Modifying sheet '{sheet}' with +{value}{unit}")
 
-        # Make a deep copy of the whole workbook
+        # Deep copy of workbook
         updated_book = {s: df.copy() for s, df in full_book.items()}
 
-        # Apply adjustment only to the specific sheet
+        # Apply adjustment for that one sheet
         updated_book[sheet] = apply_adjustment(updated_book[sheet], value, unit)
 
-        # Output file name
-        file_name = f"{output_folder}/output_{i+1}_{sheet}_{value}{unit}.xlsx"
+        # Clean unit for filename (remove % or special chars)
+        safe_unit = re.sub(r'[^A-Za-z0-9]', '', unit)
 
-        # Save full workbook
-        with pd.ExcelWriter(file_name, engine="openpyxl") as writer:
+        # Build filename
+        out_file = f"{output_folder}/{base_name}_{sheet}_{value}{safe_unit}.xlsx"
+
+        # Write file
+        with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
             for sname, df in updated_book.items():
                 df.to_excel(writer, sheet_name=sname, index=False)
 
-    print("\nAll files generated successfully!")
+    print("\nAll files generated.")
