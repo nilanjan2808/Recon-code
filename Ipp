@@ -1,0 +1,63 @@
+import pandas as pd
+import numpy as np
+import os
+
+def apply_adjustment(df, value, unit):
+    """
+    Apply adjustments to numeric cells in the DataFrame based on unit.
+    """
+
+    # Percentage adjustment
+    if unit == "%":
+        factor = 1 + (value / 100)
+        return df.applymap(
+            lambda x: x * factor if np.issubdtype(type(x), np.number) else x
+        )
+
+    # BPS adjustment
+    elif unit == "bps":
+        adj = value / 100         # 100 bps → 1
+        return df.applymap(
+            lambda x: x + adj if np.issubdtype(type(x), np.number) else x
+        )
+
+    else:
+        raise ValueError(f"Unknown unit: {unit}")
+
+
+def process_file(input_file, config_file, output_folder="outputs"):
+    # Read the entire workbook
+    full_book = pd.read_excel(input_file, sheet_name=None)
+
+    # Read config
+    config = pd.read_excel(config_file)
+
+    # Output folder
+    os.makedirs(output_folder, exist_ok=True)
+
+    for i, row in config.iterrows():
+        sheet = row["Sheet"]
+        value = row["Value"]
+        unit = row["Unit"]
+
+        if sheet not in full_book:
+            print(f"Sheet '{sheet}' not present. Skipping.")
+            continue
+
+        print(f"Generating file {i+1}: modifying '{sheet}' with +{value}{unit}")
+
+        # Make a deep copy of the whole workbook
+        updated_book = {s: df.copy() for s, df in full_book.items()}
+
+        # Apply adjustment only to the specific sheet
+        updated_book[sheet] = apply_adjustment(updated_book[sheet], value, unit)
+
+        # Output file name
+        file_name = f"{output_folder}/output_{i+1}_{sheet}_{value}{unit}.xlsx"
+
+        # Save full workbook
+        with pd.ExcelWriter(file_name, engine="openpyxl") as writer:
+            for sname, df in updated_book.items():
+                df.to_excel(writer, sheet_name=sname, index=False)
+
+    print("\nAll files generated successfully!")
