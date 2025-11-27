@@ -1,0 +1,894 @@
+# app.py
+"""
+Dash Data Quality Review Tool (single-file prototype)
+Features:
+- Upload current & previous Mastergroup, CMB, GBM (Excel or CSV)
+- Stream-convert Excel to CSV to avoid large memory usage
+- Reference data diff detection (additions / deletions / changes)
+- Mastergroup <-> Site mapping suggestions (previous mapping reuse + fuzzy match)
+- Accept/Reject mapping suggestions (stored in SQLite)
+- Financial variance analysis (nil revenue, pct & abs variance)
+- Export anomalies and mapping results to CSV
+- To-Be slider that explains maturity states
+
+Dependencies:
+- pandas
+- openpyxl
+- rapidfuzz
+- dash
+- dash-bootstrap-components
+- plotly
+- sqlalchemy (optional; sqlite3 used in code)
+- pyarrow (optional; not required)
+Install with:
+pip install pandas openpyxl rapidfuzz dash dash-bootstrap-components plotly
+"""
+
+import os
+import io
+import re
+import time
+import sqlite3
+import tempfile
+from datetime import datetime
+from zipfile import ZipFile
+
+import pandas as pd
+from rapidfuzz import fuzz, process
+
+import dash
+from dash import html, dcc, Input, Output, State, dash_table, ctx
+import dash_bootstrap_components as dbc
+import plotly.express as px
+
+# -------------------------
+# Configuration & Globals
+# -------------------------
+APP_TITLE = "DQ Review Tool (Python + Dash)"
+DB_PATH = "dq_tool.sqlite"
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+IN_SCOPE_FIELDS_MASTER = [
+    "Header",
+    "Category",
+    "Mastergroup Name",
+    "Key Field",
+    "Business Area",
+    "Country of incorporation",
+    "Industry",
+    "Client Segmentation",
+    "Supergroup Name",
+    "Global Relationship Banker GRB Name",
+    "Global Relationship Banker- GRB Location",
+    "Principal Relationship Manager- PRM Name",
+    "Principal Relationship Manager-PRM Country",
+    "Category (CMB only)",
+    "Active",
+    "Mastergroup Status",
+    "De-list Master group"
+]
+
+# minimal columns expected for financials (will be robust about missing columns)
+FINANCIALS_KEY_COLS = [
+    "Site Customer Number",
+    "Site Customer Name",
+    "Mastergroup Name",
+    "Total Operating Income (HORIS YTD Financials)",
+    "Total Operating Income (HORIS YTD Financials Prior Year This month)"
+]
+
+
+# -------------------------
+# DB helpers
+# -------------------------
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS mapping_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_cur TEXT,
+            period_prev TEXT,
+            site_no TEXT,
+            site_name TEXT,
+            suggested_mastergroup TEXT,
+            score REAL,
+            method TEXT,
+            status TEXT,
+            user TEXT,
+            ts INTEGER
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS anomalies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_cur TEXT,
+            period_prev TEXT,
+            anomaly_type TEXT,
+            entity_key TEXT,
+            field_name TEXT,
+            prev_value TEXT,
+            cur_value TEXT,
+            severity TEXT,
+            validated INTEGER,
+            ts INTEGER
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def store_mapping_suggestion(period_cur, period_prev, site_no, site_name, suggested_mastergroup, score, method):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO mapping_suggestions(period_cur, period_prev, site_no, site_name, suggested_mastergroup, score, method, status, user, ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (period_cur, period_prev, site_no, site_name, suggested_mastergroup, score, method, 'suggested', 'system', int(time.time())))
+    conn.commit()
+    conn.close()
+
+def update_mapping_status(suggestion_id, status, user='user'):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('UPDATE mapping_suggestions SET status=?, user=?, ts=? WHERE id=?', (status, user, int(time.time()), suggestion_id))
+    conn.commit()
+    conn.close()
+
+def store_anomaly(period_cur, period_prev, anomaly_type, entity_key, field_name, prev_value, cur_value, severity):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO anomalies(period_cur, period_prev, anomaly_type, entity_key, field_name, prev_value, cur_value, severity, validated, ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (period_cur, period_prev, anomaly_type, entity_key, field_name, str(prev_value), str(cur_value), severity, 0, int(time.time())))
+    conn.commit()
+    conn.close()
+
+def fetch_suggestions(limit=200):
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query('SELECT * FROM mapping_suggestions ORDER BY ts DESC LIMIT ?', conn, params=(limit,))
+    conn.close()
+    return df
+
+def fetch_anomalies(limit=500):
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query('SELECT * FROM anomalies ORDER BY ts DESC LIMIT ?', conn, params=(limit,))
+    conn.close()
+    return df
+
+# -------------------------
+# Utility functions
+# -------------------------
+def normalize_name(s):
+    """
+    Normalizes company / mastergroup / site names:
+    - lowercase
+    - remove punctuation
+    - strip legal suffixes (limited, ltd, pvt, inc, llp)
+    - collapse whitespace
+    """
+    if pd.isna(s):
+        return ""
+    s = str(s).lower()
+    # remove punctuation
+    s = re.sub(r'[^a-z0-9\s]', ' ', s)
+    # remove common suffixes
+    s = re.sub(r'\b(limited|ltd|pvt|private|inc|llp|corp|corporation|co|company)\b', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+def stream_excel_to_csv(file_stream, filename_out, sheet_name=None):
+    """
+    Stream-convert a .xlsx file-like object to CSV (constant memory).
+    Returns path to CSV.
+    """
+    # write to a temp file first
+    tmp_xlsx = os.path.join(UPLOAD_DIR, f"tmp_{int(time.time()*1000)}.xlsx")
+    with open(tmp_xlsx, 'wb') as f:
+        f.write(file_stream.read())
+
+    from openpyxl import load_workbook
+    wb = load_workbook(filename=tmp_xlsx, read_only=True, data_only=True)
+    if sheet_name is None:
+        ws = wb[wb.sheetnames[0]]
+    else:
+        ws = wb[sheet_name]
+    csv_path = os.path.join(UPLOAD_DIR, filename_out)
+    import csv
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        for row in ws.iter_rows(values_only=True):
+            writer.writerow([("" if v is None else v) for v in row])
+    # clean up tmp
+    try:
+        os.remove(tmp_xlsx)
+    except Exception:
+        pass
+    return csv_path
+
+def read_table(path_or_buffer, is_excel=False, sheet_name=None, nrows=None):
+    """
+    Read an uploaded file (CSV or Excel). For Excel uses pandas read_excel (works for small-medium files).
+    If is_excel True and file-like, do streaming convert to CSV first.
+    """
+    if hasattr(path_or_buffer, "read"):  # file-like from upload
+        # check filename property? We'll assume is_excel flag tells format
+        if is_excel:
+            filename_out = f"uploaded_{int(time.time()*1000)}.csv"
+            csv_path = stream_excel_to_csv(path_or_buffer, filename_out, sheet_name=sheet_name)
+            df = pd.read_csv(csv_path, nrows=nrows)
+            return df, csv_path
+        else:
+            # CSV in memory
+            s = path_or_buffer.read()
+            if isinstance(s, bytes):
+                s = s.decode('utf-8', errors='replace')
+            df = pd.read_csv(io.StringIO(s), nrows=nrows)
+            path = os.path.join(UPLOAD_DIR, f"uploaded_{int(time.time()*1000)}.csv")
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(s)
+            return df, path
+    else:
+        # path on disk
+        path = path_or_buffer
+        if str(path).lower().endswith(('.xls', '.xlsx', '.xlsb')):
+            # convert
+            df = pd.read_excel(path, sheet_name=sheet_name, engine='openpyxl', nrows=nrows)
+            return df, path
+        else:
+            df = pd.read_csv(path, nrows=nrows)
+            return df, path
+
+# -------------------------
+# Core logic: Diff & Mapping Suggestion
+# -------------------------
+def detect_reference_diffs(master_prev_df, master_cur_df, key_field='Key Field', name_field='Mastergroup Name'):
+    """
+    Compares previous and current mastergroup dataframes and returns:
+    - additions
+    - deletions
+    - modifications (per in-scope field)
+    Stores anomalies into DB as it finds them.
+    """
+    # Normalize names and create join key
+    prev = master_prev_df.copy()
+    cur = master_cur_df.copy()
+    prev['norm_name'] = prev.get(name_field, "").apply(normalize_name)
+    cur['norm_name'] = cur.get(name_field, "").apply(normalize_name)
+
+    # Create deterministic key if key_field is present and unique
+    if key_field in prev.columns and key_field in cur.columns:
+        prev['join_key'] = prev[key_field].astype(str)
+        cur['join_key'] = cur[key_field].astype(str)
+    else:
+        # fallback to normalized name
+        prev['join_key'] = prev['norm_name']
+        cur['join_key'] = cur['norm_name']
+
+    # set index
+    prev_idx = prev.set_index('join_key', drop=False)
+    cur_idx = cur.set_index('join_key', drop=False)
+
+    prev_keys = set(prev_idx.index)
+    cur_keys = set(cur_idx.index)
+
+    added_keys = cur_keys - prev_keys
+    deleted_keys = prev_keys - cur_keys
+    common_keys = cur_keys & prev_keys
+
+    anomalies = []
+
+    for k in added_keys:
+        row = cur_idx.loc[k]
+        store_anomaly(period_cur='cur', period_prev='prev', anomaly_type='added', entity_key=k,
+                      field_name='row', prev_value=None, cur_value=row.to_dict(), severity='low')
+        anomalies.append({'type': 'added', 'key': k, 'row': row.to_dict()})
+
+    for k in deleted_keys:
+        row = prev_idx.loc[k]
+        store_anomaly(period_cur='cur', period_prev='prev', anomaly_type='deleted', entity_key=k,
+                      field_name='row', prev_value=row.to_dict(), cur_value=None, severity='high')
+        anomalies.append({'type': 'deleted', 'key': k, 'row': row.to_dict()})
+
+    for k in common_keys:
+        r_prev = prev_idx.loc[k]
+        r_cur = cur_idx.loc[k]
+        # compare only in-scope fields (if present)
+        for fld in list(set(IN_SCOPE_FIELDS_MASTER) & set(prev.columns) & set(cur.columns)):
+            pv = r_prev.get(fld)
+            cv = r_cur.get(fld)
+            if (pd.isna(pv) and pd.isna(cv)) or (str(pv) == str(cv)):
+                continue
+            # severity heuristics
+            severity = 'low'
+            if fld.lower().find('status') >= 0 or fld.lower().find('active') >= 0 or fld.lower().find('prm') >= 0 or fld.lower().find('grb') >= 0:
+                severity = 'high'
+            store_anomaly(period_cur='cur', period_prev='prev', anomaly_type='modified',
+                          entity_key=k, field_name=fld, prev_value=pv, cur_value=cv, severity=severity)
+            anomalies.append({'type': 'modified', 'key': k, 'field': fld, 'prev': pv, 'cur': cv, 'severity': severity})
+
+    return anomalies
+
+
+def build_master_index(master_df):
+    """Return a list of (master_id, norm_name) tuples used for matching."""
+    df = master_df.copy()
+    name_col = 'Mastergroup Name' if 'Mastergroup Name' in df.columns else df.columns[0]
+    df['norm_name'] = df[name_col].apply(normalize_name)
+    # use Key Field if exists as ID
+    id_col = 'Key Field' if 'Key Field' in df.columns else df.index.name or 'index'
+    if id_col == 'index':
+        df = df.reset_index()
+        id_col = df.columns[0]
+    entries = list(zip(df[id_col].astype(str), df['norm_name']))
+    return entries
+
+
+def suggest_mastergroup_for_site(site_name, master_index, prev_mapping=None, site_no=None, top_n=3):
+    """
+    Suggest mastergroups for a given site_name.
+    master_index: list of tuples (master_id, norm_name)
+    prev_mapping: the master_id from previous mapping (if any) - gives priority
+    Returns top_n suggestions: list of (master_id, score, reason)
+    """
+    site_norm = normalize_name(site_name)
+    choices = {mid: name for mid, name in master_index}
+
+    # If prev_map exists, suggest it with a large base score
+    suggestions = []
+    if prev_mapping and prev_mapping in choices:
+        suggestions.append((prev_mapping, 95.0, 'previous_mapping'))
+
+    # rapidfuzz best matches
+    results = process.extract(site_norm, choices, scorer=fuzz.token_sort_ratio, limit=top_n*3)
+    # results: list of tuples (match, score, key)
+    seen = set([s[0] for s in suggestions])
+    for match_name, score, mid in results:
+        if mid in seen:
+            continue
+        suggestions.append((mid, float(score), 'fuzzy'))
+        seen.add(mid)
+        if len(suggestions) >= top_n:
+            break
+    # Ensure sorted by score desc
+    suggestions = sorted(suggestions, key=lambda x: -x[1])[:top_n]
+    return suggestions
+
+
+# -------------------------
+# Financial variance
+# -------------------------
+def aggregate_financials(fin_df, mapping_table=None):
+    """
+    Aggregate financials per Mastergroup using mapping table or directly from financials Mastergroup Name
+    mapping_table: DataFrame with columns site_no -> master_id
+    Returns df_agg indexed by master_id with columns cur_sum and prev_sum
+    """
+    df = fin_df.copy()
+    # try to standardize column names by fuzzy matching keys
+    # find column names heuristically
+    cols = df.columns.tolist()
+    def find_col_like(key):
+        for c in cols:
+            if key.lower() in c.lower():
+                return c
+        return None
+
+    col_site_no = find_col_like('Site Customer Number') or find_col_like('site') or cols[0]
+    col_site_name = find_col_like('Site Customer Name') or find_col_like('name') or cols[1]
+    col_master = find_col_like('Mastergroup Name') or find_col_like('master') or None
+    col_cur_income = find_col_like('Total Operating Income (HORIS YTD Financials)') or find_col_like('total operating income') or find_col_like('total') or None
+    col_prev_income = find_col_like('Total Operating Income (HORIS YTD Financials Prior Year This month)') or find_col_like('prior') or None
+
+    df['site_no'] = df[col_site_no].astype(str)
+    df['site_name'] = df[col_site_name].astype(str)
+    df['cur_income'] = pd.to_numeric(df[col_cur_income], errors='coerce').fillna(0) if col_cur_income else 0
+    df['prev_income'] = pd.to_numeric(df[col_prev_income], errors='coerce').fillna(0) if col_prev_income else 0
+
+    if mapping_table is not None and 'site_no' in mapping_table.columns and 'suggested_mastergroup' in mapping_table.columns:
+        map_df = mapping_table[['site_no', 'suggested_mastergroup']].copy()
+        map_df = map_df[map_df['suggested_mastergroup'].notna()]
+        df = df.merge(map_df, on='site_no', how='left')
+        df['master_id'] = df['suggested_mastergroup'].fillna(df[col_master] if col_master else 'unmapped')
+    else:
+        # use master column if present
+        df['master_id'] = df[col_master].fillna('unmapped') if col_master else 'unmapped'
+
+    agg = df.groupby('master_id').agg({'cur_income': 'sum', 'prev_income': 'sum'}).reset_index()
+    agg['abs_var'] = agg['cur_income'] - agg['prev_income']
+    def pct(r):
+        if r['prev_income'] == 0:
+            return None
+        else:
+            return (r['abs_var'] / r['prev_income']) * 100
+    agg['pct_var'] = agg.apply(pct, axis=1)
+    agg['nil_revenue'] = agg.apply(lambda r: (r['cur_income'] == 0 and r['prev_income'] > 0), axis=1)
+    return agg
+
+# -------------------------
+# Dash App Layout
+# -------------------------
+init_db()
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title=APP_TITLE)
+server = app.server
+
+app.layout = dbc.Container([
+    dbc.Row([
+        dbc.Col(html.H2(APP_TITLE), width=8),
+        dbc.Col(dcc.Markdown("Built with Python + Dash — Reference data diffs, mapping suggestions, variance analysis."), width=4)
+    ], align='center', className='my-2'),
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("1. Upload / Convert Files"),
+                dbc.CardBody([
+                    html.Div("Upload the required files: Current & Previous Mastergroup, CMB, GBM. Excel (.xlsx/.xls) or CSV supported."),
+                    dcc.Upload(id='upload-master-cur', children=html.Button('Upload Mastergroup - Current'), multiple=False),
+                    html.Div(id='upload-master-cur-status', className='small text-muted'),
+                    html.Hr(),
+                    dcc.Upload(id='upload-master-prev', children=html.Button('Upload Mastergroup - Previous'), multiple=False),
+                    html.Div(id='upload-master-prev-status', className='small text-muted'),
+                    html.Hr(),
+                    dcc.Upload(id='upload-cmb-cur', children=html.Button('Upload CMB - Current'), multiple=False),
+                    html.Div(id='upload-cmb-cur-status', className='small text-muted'),
+                    html.Hr(),
+                    dcc.Upload(id='upload-cmb-prev', children=html.Button('Upload CMB - Previous'), multiple=False),
+                    html.Div(id='upload-cmb-prev-status', className='small text-muted'),
+                    html.Hr(),
+                    dcc.Upload(id='upload-gbm-cur', children=html.Button('Upload GBM - Current (optional)'), multiple=False),
+                    html.Div(id='upload-gbm-cur-status', className='small text-muted'),
+                    html.Hr(),
+                    dcc.Upload(id='upload-gbm-prev', children=html.Button('Upload GBM - Previous (optional)'), multiple=False),
+                    html.Div(id='upload-gbm-prev-status', className='small text-muted'),
+                    html.Hr(),
+                    dbc.Button("Run Ingest & Detect Diffs", id='run-ingest', color='primary', className='mt-2'),
+                    html.Div(id='ingest-result', className='mt-2')
+                ])
+            ])
+        ], width=4),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("2. To-Be Slider (Maturity)"),
+                dbc.CardBody([
+                    dcc.Slider(id='maturity-slider', min=0, max=3, step=1, value=1,
+                               marks={0: 'Manual', 1: 'Suggest', 2: 'Validate', 3: 'Auto'}),
+                    html.Div(id='maturity-text', className='mt-2')
+                ])
+            ]),
+            html.Br(),
+            dbc.Card([
+                dbc.CardHeader("Quick Actions"),
+                dbc.CardBody([
+                    dbc.Button("Show Suggestions", id='btn-show-suggestions', color='secondary', className='me-2'),
+                    dbc.Button("Show Anomalies", id='btn-show-anomalies', color='danger', className='me-2'),
+                    dbc.Button("Export Anomalies CSV", id='btn-export-anomalies', color='success'),
+                    html.Div(id='export-result', className='mt-2')
+                ])
+            ])
+        ], width=8)
+    ]),
+    html.Hr(),
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Reference Data Diffs"),
+                dbc.CardBody([
+                    html.Div(id='diffs-summary'),
+                    dash_table.DataTable(id='diffs-table', page_size=10,
+                                         style_table={'overflowX': 'auto'},
+                                         style_cell={'textAlign': 'left'},
+                                         columns=[{"name": "Type", "id": "type"},
+                                                  {"name": "Key", "id": "key"},
+                                                  {"name": "Field", "id": "field"},
+                                                  {"name": "Prev", "id": "prev"},
+                                                  {"name": "Cur", "id": "cur"},
+                                                  {"name": "Severity", "id": "severity"}])
+                ])
+            ])
+        ], width=6),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Mapping Suggestions (Mastergroup ↔ Site)"),
+                dbc.CardBody([
+                    html.Div("Select a sample site (or upload mapping file). Accept / Reject suggestions."),
+                    dash_table.DataTable(id='suggestions-table', page_size=8,
+                                         style_table={'overflowX': 'auto'},
+                                         columns=[
+                                             {"name": "ID", "id": "id"},
+                                             {"name": "Site No", "id": "site_no"},
+                                             {"name": "Site Name", "id": "site_name"},
+                                             {"name": "Suggestion", "id": "suggested_mastergroup"},
+                                             {"name": "Score", "id": "score"},
+                                             {"name": "Method", "id": "method"},
+                                             {"name": "Status", "id": "status"}
+                                         ]),
+                    html.Div([
+                        dbc.Button("Accept Selected", id='btn-accept-selected', color='primary', className='me-2'),
+                        dbc.Button("Reject Selected", id='btn-reject-selected', color='danger')
+                    ], className='mt-2')
+                ])
+            ])
+        ], width=6)
+    ]),
+    html.Hr(),
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Financial Variance Dashboard"),
+                dbc.CardBody([
+                    html.Div(id='variance-kpis', className='mb-2'),
+                    dcc.Graph(id='variance-chart'),
+                    dash_table.DataTable(id='variance-table', page_size=10,
+                                         style_table={'overflowX': 'auto'},
+                                         columns=[
+                                             {"name": "Mastergroup", "id": "master_id"},
+                                             {"name": "Cur Income", "id": "cur_income"},
+                                             {"name": "Prev Income", "id": "prev_income"},
+                                             {"name": "Abs Var", "id": "abs_var"},
+                                             {"name": "Pct Var", "id": "pct_var"},
+                                             {"name": "Nil Revenue", "id": "nil_revenue"}
+                                         ]),
+                    html.Div(id='variance-actions')
+                ])
+            ])
+        ], width=12)
+    ]),
+    html.Hr(),
+    dbc.Row([
+        dbc.Col(html.Div(id='hidden-stores', style={'display': 'none'}))
+    ]),
+    html.Div(id='footer', children=[
+        html.Small(f'Local SQLite DB: {DB_PATH}'),
+        html.Br(),
+        html.Small('Note: This is a prototype. For very large files stream-conversion to CSV is used.')
+    ], className='text-muted mt-4')
+], fluid=True)
+
+
+# -------------------------
+# Callbacks & Handlers
+# -------------------------
+
+# Helper: parse uploaded file content (dcc.Upload sends base64)
+import base64
+
+def parse_upload(contents, filename):
+    """
+    contents: the contents string delivered by dcc.Upload
+    returns: (pandas.DataFrame, saved_path)
+    """
+    if contents is None:
+        return None, None
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    # Create BytesIO
+    file_like = io.BytesIO(decoded)
+    # decide type by filename extension
+    if filename.lower().endswith(('.xls', '.xlsx', '.xlsb')):
+        # stream convert to CSV using openpyxl
+        csv_name = f"{int(time.time()*1000)}_{filename.rsplit('.',1)[0]}.csv"
+        csv_path = stream_excel_to_csv(file_like, csv_name)
+        df = pd.read_csv(csv_path)
+        return df, csv_path
+    else:
+        # assume CSV/text
+        try:
+            s = decoded.decode('utf-8', errors='replace')
+            df = pd.read_csv(io.StringIO(s))
+            path = os.path.join(UPLOAD_DIR, f"{int(time.time()*1000)}_{filename}")
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(s)
+            return df, path
+        except Exception as e:
+            print("Failed to parse upload:", e)
+            return None, None
+
+# store uploaded DataFrames in memory refs (for prototype)
+MEMORY_TABLES = {
+    'master_cur': None,
+    'master_cur_path': None,
+    'master_prev': None,
+    'master_prev_path': None,
+    'cmb_cur': None,
+    'cmb_cur_path': None,
+    'cmb_prev': None,
+    'cmb_prev_path': None,
+    'gbm_cur': None,
+    'gbm_cur_path': None,
+    'gbm_prev': None,
+    'gbm_prev_path': None
+}
+
+@app.callback(Output('upload-master-cur-status', 'children'),
+              Input('upload-master-cur', 'contents'),
+              State('upload-master-cur', 'filename'))
+def handle_master_cur(contents, filename):
+    if contents is None:
+        return "No file uploaded."
+    df, path = parse_upload(contents, filename)
+    if df is None:
+        return "Failed to parse file."
+    MEMORY_TABLES['master_cur'] = df
+    MEMORY_TABLES['master_cur_path'] = path
+    return f"Master Current uploaded: {filename} ({len(df)} rows) saved as {path}"
+
+@app.callback(Output('upload-master-prev-status', 'children'),
+              Input('upload-master-prev', 'contents'),
+              State('upload-master-prev', 'filename'))
+def handle_master_prev(contents, filename):
+    if contents is None:
+        return "No file uploaded."
+    df, path = parse_upload(contents, filename)
+    if df is None:
+        return "Failed to parse file."
+    MEMORY_TABLES['master_prev'] = df
+    MEMORY_TABLES['master_prev_path'] = path
+    return f"Master Previous uploaded: {filename} ({len(df)} rows) saved as {path}"
+
+@app.callback(Output('upload-cmb-cur-status', 'children'),
+              Input('upload-cmb-cur', 'contents'),
+              State('upload-cmb-cur', 'filename'))
+def handle_cmb_cur(contents, filename):
+    if contents is None:
+        return "No file uploaded."
+    df, path = parse_upload(contents, filename)
+    if df is None:
+        return "Failed to parse file."
+    MEMORY_TABLES['cmb_cur'] = df
+    MEMORY_TABLES['cmb_cur_path'] = path
+    return f"CMB Current uploaded: {filename} ({len(df)} rows) saved as {path}"
+
+@app.callback(Output('upload-cmb-prev-status', 'children'),
+              Input('upload-cmb-prev', 'contents'),
+              State('upload-cmb-prev', 'filename'))
+def handle_cmb_prev(contents, filename):
+    if contents is None:
+        return "No file uploaded."
+    df, path = parse_upload(contents, filename)
+    if df is None:
+        return "Failed to parse file."
+    MEMORY_TABLES['cmb_prev'] = df
+    MEMORY_TABLES['cmb_prev_path'] = path
+    return f"CMB Previous uploaded: {filename} ({len(df)} rows) saved as {path}"
+
+@app.callback(Output('upload-gbm-cur-status', 'children'),
+              Input('upload-gbm-cur', 'contents'),
+              State('upload-gbm-cur', 'filename'))
+def handle_gbm_cur(contents, filename):
+    if contents is None:
+        return "No file uploaded."
+    df, path = parse_upload(contents, filename)
+    if df is None:
+        return "Failed to parse file."
+    MEMORY_TABLES['gbm_cur'] = df
+    MEMORY_TABLES['gbm_cur_path'] = path
+    return f"GBM Current uploaded: {filename} ({len(df)} rows) saved as {path}"
+
+@app.callback(Output('upload-gbm-prev-status', 'children'),
+              Input('upload-gbm-prev', 'contents'),
+              State('upload-gbm-prev', 'filename'))
+def handle_gbm_prev(contents, filename):
+    if contents is None:
+        return "No file uploaded."
+    df, path = parse_upload(contents, filename)
+    if df is None:
+        return "Failed to parse file."
+    MEMORY_TABLES['gbm_prev'] = df
+    MEMORY_TABLES['gbm_prev_path'] = path
+    return f"GBM Previous uploaded: {filename} ({len(df)} rows) saved as {path}"
+
+@app.callback(
+    Output('ingest-result', 'children'),
+    Input('run-ingest', 'n_clicks'),
+    prevent_initial_call=True
+)
+def run_ingest(n):
+    # simple ingest: run diff detection on master groups and suggest mappings for sites from CMB current
+    master_prev = MEMORY_TABLES.get('master_prev')
+    master_cur = MEMORY_TABLES.get('master_cur')
+    cmb_cur = MEMORY_TABLES.get('cmb_cur')
+    cmb_prev = MEMORY_TABLES.get('cmb_prev')
+    if master_prev is None or master_cur is None:
+        return dbc.Alert("Please upload Mastergroup previous and current files before running ingest.", color='warning')
+
+    # detect diffs
+    anomalies = detect_reference_diffs(master_prev, master_cur)
+
+    # build master index
+    master_index = build_master_index(master_cur)
+
+    # build prev mapping lookup from DB (site_no -> previous master) from mapping_suggestions table (accepted entries)
+    conn = sqlite3.connect(DB_PATH)
+    prev_map_df = pd.read_sql_query("SELECT site_no, suggested_mastergroup FROM mapping_suggestions WHERE status='accepted'", conn)
+    conn.close()
+    prev_map_lookup = dict(zip(prev_map_df['site_no'], prev_map_df['suggested_mastergroup'])) if not prev_map_df.empty else {}
+
+    # Suggest mappings for a sample of sites from CMB current (if present)
+    suggestions_created = 0
+    if cmb_cur is not None:
+        # pick top N sample rows
+        sample = cmb_cur.head(200)  # keep limited for prototype
+        site_name_col = None
+        if 'Site Customer Name' in sample.columns:
+            site_name_col = 'Site Customer Name'
+        else:
+            # heuristics
+            for c in sample.columns:
+                if 'site' in c.lower() and 'name' in c.lower():
+                    site_name_col = c
+                    break
+        site_no_col = None
+        for c in sample.columns:
+            if 'site' in c.lower() and 'number' in c.lower():
+                site_no_col = c
+                break
+        if site_name_col is None:
+            site_name_col = sample.columns[1] if len(sample.columns) > 1 else sample.columns[0]
+        if site_no_col is None:
+            site_no_col = sample.columns[0]
+
+        for idx, r in sample.iterrows():
+            site_no = str(r.get(site_no_col, ''))
+            site_name = r.get(site_name_col, '')
+            prev_mapping = prev_map_lookup.get(site_no)
+            suggestions = suggest_mastergroup_for_site(site_name, master_index, prev_mapping, site_no=site_no, top_n=3)
+            # store the top suggestion only for now
+            if suggestions:
+                top = suggestions[0]
+                store_mapping_suggestion(period_cur='cur', period_prev='prev', site_no=site_no, site_name=site_name,
+                                         suggested_mastergroup=top[0], score=top[1], method=top[2])
+                suggestions_created += 1
+
+    return dbc.Alert([
+        html.Div(f"Detected {len(anomalies)} reference anomalies (stored)."),
+        html.Div(f"Created {suggestions_created} mapping suggestions (sample from CMB current)."),
+        html.Div("Use the Mapping Suggestions table and Reference Data Diffs to review.")
+    ], color='success')
+
+
+@app.callback(
+    Output('diffs-summary', 'children'),
+    Output('diffs-table', 'data'),
+    Input('btn-show-anomalies', 'n_clicks'),
+    prevent_initial_call=True
+)
+def show_anomalies(n):
+    df = fetch_anomalies(limit=500)
+    if df.empty:
+        return "No anomalies recorded.", []
+    # convert row contents to preview strings
+    data = []
+    for _, row in df.iterrows():
+        data.append({
+            'type': row['anomaly_type'],
+            'key': row['entity_key'],
+            'field': row['field_name'],
+            'prev': (row['prev_value'][:80] + '...') if row['prev_value'] and len(str(row['prev_value'])) > 80 else row['prev_value'],
+            'cur': (row['cur_value'][:80] + '...') if row['cur_value'] and len(str(row['cur_value'])) > 80 else row['cur_value'],
+            'severity': row['severity']
+        })
+    summary = f"Showing {len(data)} anomalies (most recent)."
+    return summary, data
+
+@app.callback(
+    Output('suggestions-table', 'data'),
+    Input('btn-show-suggestions', 'n_clicks'),
+    prevent_initial_call=True
+)
+def show_suggestions(n):
+    df = fetch_suggestions(limit=500)
+    if df.empty:
+        return []
+    dfr = df[['id', 'site_no', 'site_name', 'suggested_mastergroup', 'score', 'method', 'status']].to_dict('records')
+    return dfr
+
+@app.callback(
+    Output('suggestions-table', 'selected_rows'),
+    Output('export-result', 'children'),
+    Input('btn-export-anomalies', 'n_clicks'),
+    prevent_initial_call=True
+)
+def export_anomalies(n):
+    df = fetch_anomalies(limit=10000)
+    if df.empty:
+        return [], dbc.Alert("No anomalies to export.", color='warning')
+    fname = f"anomalies_export_{int(time.time())}.csv"
+    df.to_csv(fname, index=False)
+    return [], dbc.Alert([html.Span("Anomalies exported: "), html.A(fname, href=f'/{fname}', target='_blank')], color='success')
+
+@app.callback(
+    Output('suggestions-table', 'data'),
+    Output('export-result', 'children'),
+    Input('btn-accept-selected', 'n_clicks'),
+    Input('btn-reject-selected', 'n_clicks'),
+    State('suggestions-table', 'derived_virtual_selected_rows'),
+    State('suggestions-table', 'data'),
+    prevent_initial_call=True
+)
+def accept_reject(n_accept, n_reject, selected_rows, table_data):
+    triggered = ctx.triggered_id
+    if not selected_rows:
+        return table_data, dbc.Alert("No rows selected.", color='warning')
+    ids = [table_data[i]['id'] for i in selected_rows]
+    for sid in ids:
+        if triggered == 'btn-accept-selected':
+            update_mapping_status(sid, 'accepted')
+        else:
+            update_mapping_status(sid, 'rejected')
+    df = fetch_suggestions(limit=500)
+    df_records = df[['id', 'site_no', 'site_name', 'suggested_mastergroup', 'score', 'method', 'status']].to_dict('records')
+    return df_records, dbc.Alert(f"{len(ids)} suggestions updated.", color='success')
+
+
+@app.callback(
+    Output('variance-kpis', 'children'),
+    Output('variance-chart', 'figure'),
+    Output('variance-table', 'data'),
+    Input('btn-show-suggestions', 'n_clicks'),
+    Input('btn-show-anomalies', 'n_clicks'),
+    Input('btn-export-anomalies', 'n_clicks'),
+    prevent_initial_call=True
+)
+def compute_variance(*args):
+    # compute variance using CMB current & previous and accepted mappings
+    cmb_cur = MEMORY_TABLES.get('cmb_cur')
+    cmb_prev = MEMORY_TABLES.get('cmb_prev')
+    if cmb_cur is None or cmb_prev is None:
+        return "Upload CMB Current & Previous to compute variance.", px.Figure(), []
+    # merge current and previous into a single dataframe keyed by site_no
+    # for simplicity use aggregate_financials on current with mapping table
+    conn = sqlite3.connect(DB_PATH)
+    map_df = pd.read_sql_query("SELECT site_no, suggested_mastergroup, status FROM mapping_suggestions WHERE status='accepted'", conn) if conn else pd.DataFrame()
+    conn.close()
+    agg_cur = aggregate_financials(cmb_cur, mapping_table=map_df)
+    agg_prev = aggregate_financials(cmb_prev, mapping_table=map_df)
+    # join on master_id
+    df = agg_cur.set_index('master_id').join(agg_prev.set_index('master_id'), lsuffix='_cur', rsuffix='_prev', how='outer').fillna(0)
+    # compute fields
+    df['cur_income'] = df.get('cur_income') if 'cur_income' in df.columns else df['cur_income_cur']
+    df['prev_income'] = df.get('prev_income') if 'prev_income' in df.columns else df['prev_income_cur'] if 'prev_income_cur' in df.columns else 0
+    df_reset = df.reset_index().rename(columns={'index': 'master_id'})
+    # handle columns named differently from aggregate_financials
+    if 'abs_var' not in df_reset.columns:
+        df_reset['abs_var'] = df_reset['cur_income'] - df_reset['prev_income']
+    if 'pct_var' not in df_reset.columns:
+        df_reset['pct_var'] = df_reset.apply(lambda r: None if r['prev_income']==0 else (r['abs_var']/r['prev_income'])*100, axis=1)
+    if 'nil_revenue' not in df_reset.columns:
+        df_reset['nil_revenue'] = df_reset.apply(lambda r: (r['cur_income']==0 and r['prev_income']>0), axis=1)
+    # KPIs
+    total_flagged = int(df_reset['nil_revenue'].sum() + df_reset[df_reset['pct_var'].abs() > 20].shape[0])
+    total_variance = df_reset['abs_var'].sum()
+    kpis = html.Div([
+        html.Span(f"Mastergroups flagged: {total_flagged}   "),
+        html.Span(f"Total variance (abs): {total_variance:.2f}")
+    ])
+
+    # chart: top 10 by abs variance
+    top10 = df_reset.reindex(df_reset['abs_var'].abs().sort_values(ascending=False).index).head(10)
+    fig = px.bar(top10, x='master_id', y='abs_var', title='Top 10 Mastergroups by abs variance')
+
+    table_records = df_reset[['master_id', 'cur_income', 'prev_income', 'abs_var', 'pct_var', 'nil_revenue']].to_dict('records')
+    return kpis, fig, table_records
+
+
+@app.callback(
+    Output('maturity-text', 'children'),
+    Input('maturity-slider', 'value')
+)
+def maturity_text(v):
+    texts = {
+        0: "Manual: Users manually compare files in Excel and note differences.",
+        1: "Suggest: System auto-detects diffs and suggests mastergroup mappings for user review.",
+        2: "Validate: System compares flagged anomalies with golden source and marks validated ones.",
+        3: "Auto: Scheduled runs auto-ingest, auto-suggest mappings and auto-validate; human only for exceptions."
+    }
+    return texts.get(v, "")
+
+
+# -------------------------
+# Run
+# -------------------------
+if __name__ == '__main__':
+    print("Starting DQ Review Tool. Visit http://127.0.0.1:8050")
+    app.run_server(debug=True)
