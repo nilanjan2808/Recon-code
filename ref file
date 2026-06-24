@@ -1,0 +1,179 @@
+import os
+import re
+import pandas as pd
+import win32com.client as win32
+
+
+def extract_filename(link):
+    """
+    Extract filename from a full path or URL.
+    Example:
+    C:\\Folder\\Model.xlsb -> Model.xlsb
+    https://site/file.xlsx -> file.xlsx
+    """
+    if not link:
+        return None
+
+    return re.split(r"[\\/]", str(link))[-1].strip()
+
+
+def find_external_references(workbook_path, password=None):
+
+    excel = win32.Dispatch("Excel.Application")
+
+    excel.Visible = False
+    excel.DisplayAlerts = False
+    excel.AskToUpdateLinks = False
+    excel.ScreenUpdating = False
+
+    results = []
+
+    try:
+
+        wb = excel.Workbooks.Open(
+            workbook_path,
+            UpdateLinks=0,
+            ReadOnly=True,
+            Password=password if password else ""
+        )
+
+        links = wb.LinkSources(1)
+
+        if not links:
+
+            wb.Close(False)
+
+            return pd.DataFrame(
+                columns=[
+                    "Referenced_File",
+                    "First_Sheet",
+                    "First_Cell",
+                    "Formula"
+                ]
+            )
+
+        links = list(links)
+
+        found_links = set()
+
+        for ws in wb.Worksheets:
+
+            try:
+                formula_cells = ws.UsedRange.SpecialCells(-4123)
+                # xlCellTypeFormulas
+
+            except:
+                continue
+
+            for cell in formula_cells:
+
+                try:
+                    formula = str(cell.Formula)
+
+                except:
+                    continue
+
+                formula_lower = formula.lower()
+
+                for link in links:
+
+                    filename = extract_filename(link)
+
+                    if not filename:
+                        continue
+
+                    if filename.lower() in formula_lower:
+
+                        if filename.lower() not in found_links:
+
+                            results.append(
+                                {
+                                    "Referenced_File": filename,
+                                    "First_Sheet": ws.Name,
+                                    "First_Cell": cell.Address(
+                                        RowAbsolute=False,
+                                        ColumnAbsolute=False
+                                    ),
+                                    "Formula": formula
+                                }
+                            )
+
+                            found_links.add(
+                                filename.lower()
+                            )
+
+                # Stop early if all links found
+                if len(found_links) == len(links):
+                    break
+
+            if len(found_links) == len(links):
+                break
+
+        wb.Close(False)
+
+    finally:
+
+        excel.Quit()
+
+    return pd.DataFrame(results)
+
+
+if __name__ == "__main__":
+
+    print("=" * 60)
+    print("Excel External Reference Scanner")
+    print("=" * 60)
+
+    workbook = input(
+        '\nEnter workbook path (you may paste with quotes):\n'
+    ).strip()
+
+    workbook = workbook.strip('"').strip("'")
+
+    password = input(
+        '\nEnter workbook password (press Enter if none):\n'
+    ).strip()
+
+    try:
+
+        print("\nScanning workbook...")
+        print("Please wait...\n")
+
+        df = find_external_references(
+            workbook_path=workbook,
+            password=password if password else None
+        )
+
+        output_file = os.path.join(
+            os.path.dirname(workbook),
+            "external_reference_report.xlsx"
+        )
+
+        df.to_excel(
+            output_file,
+            index=False
+        )
+
+        print("=" * 60)
+
+        if len(df) == 0:
+            print("No external workbook references found.")
+        else:
+            print(f"Found {len(df)} external reference(s):\n")
+            print(df[[
+                "Referenced_File",
+                "First_Sheet",
+                "First_Cell"
+            ]].to_string(index=False))
+
+        print("\nReport saved to:")
+        print(output_file)
+
+        print("=" * 60)
+
+    except Exception as e:
+
+        print("\nERROR:")
+        print(str(e))
+
+    input("\nPress Enter to exit...")
